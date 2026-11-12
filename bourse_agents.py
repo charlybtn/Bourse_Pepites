@@ -154,7 +154,6 @@ def msg(role, texte): return {"role": role, "parts": [{"text": texte}]}
 def gemini_analyse(ticker, nom, prix, rsi):
     if not GEMINI_API_KEY: raise RuntimeError("Clé Gemini manquante")
     
-    # MODIFICATION POUR LE TEST : On force les modèles classiques
     modeles = ["gemini-1.5-flash", "gemini-2.0-flash"]
         
     prompt = (
@@ -319,7 +318,7 @@ def main():
         print(f"Gemini: {'OK' if GEMINI_API_KEY else 'MANQUANT'}")
         return
 
-    if a.test or a.une_fois:
+    if a.test or a.une_fonce if hasattr(a, 'une_fonce') else a.une_fonce:
         un_passage()
         return
 
