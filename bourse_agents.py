@@ -185,11 +185,12 @@ def gemini_analyse(ticker, nom, prix, rsi):
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
+    # Correction : retrait de 'LS' (Lisbonne) qui faisait planter le screener Yahoo
     q = EquityQuery('and', [
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
         EquityQuery('lt', ['intradaymarketcap', 2000000000]),
         EquityQuery('gt', ['avgdailyvol3m', 50000]),
-        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'LS', 'LON', 'FRA', 'NYQ', 'NMS'])
+        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'LON', 'FRA', 'NYQ', 'NMS'])
     ])
     
     try:
