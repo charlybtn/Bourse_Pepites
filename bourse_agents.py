@@ -159,7 +159,8 @@ def msg(role, texte): return {"role": role, "parts": [{"text": texte}]}
 
 def gemini_analyse(ticker, nom, prix, rsi):
     if not GEMINI_API_KEY: raise RuntimeError("Clé Gemini manquante")
-    modeles = ["gemini-1.5-flash", "gemini-2.0-flash"]
+    # On privilégie le modèle le plus récent (2.0) avec l'ancien en secours
+    modeles = ["gemini-2.0-flash", "gemini-1.5-flash"]
     
     prompt = (
         f"Tu es un analyste financier expert. Analyse l'entreprise {nom} (ticker {ticker}).\n"
@@ -185,8 +186,6 @@ def gemini_analyse(ticker, nom, prix, rsi):
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
-    # CORRECTION FINALE : On garde uniquement les codes stricts reconnus par Yahoo
-    # PAR = Paris, AMS = Amsterdam, BRU = Bruxelles, FRA = Francfort, NYQ = NYSE, NMS = Nasdaq
     q = EquityQuery('and', [
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
         EquityQuery('lt', ['intradaymarketcap', 2000000000]),
