@@ -185,12 +185,13 @@ def gemini_analyse(ticker, nom, prix, rsi):
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
-    # Correction : retrait de 'LS' (Lisbonne) qui faisait planter le screener Yahoo
+    # CORRECTION FINALE : On garde uniquement les codes stricts reconnus par Yahoo
+    # PAR = Paris, AMS = Amsterdam, BRU = Bruxelles, FRA = Francfort, NYQ = NYSE, NMS = Nasdaq
     q = EquityQuery('and', [
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
         EquityQuery('lt', ['intradaymarketcap', 2000000000]),
         EquityQuery('gt', ['avgdailyvol3m', 50000]),
-        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'LON', 'FRA', 'NYQ', 'NMS'])
+        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS'])
     ])
     
     try:
@@ -201,8 +202,8 @@ def agent_actualites():
             if quote.get("quoteType") == "EQUITY": 
                 candidats.add(sym)
         log.info(f"Agent 1 : {len(candidats)} pépites trouvées.")
-    except Exception:
-        log.error("Échec du screener. Bascule sur la liste de secours.")
+    except Exception as e:
+        log.error(f"Échec du screener : {e}. Bascule sur la liste de secours.")
     
     if not candidats:
         candidats.update(TICKERS_SECOURS)
@@ -251,8 +252,6 @@ def agent_analyse_fondamentale(titre):
             score = int(g.get("score", 0))
             raison = g.get("raison", "")
         except Exception as e:
-            # PROTECTION ANTI-CRASH : Si Gemini plante (quota épuisé, etc.), 
-            # on ignore l'action au lieu de faire planter tout le programme.
             log.warning(f"Gemini a échoué pour {ticker} : {e}")
             return None
             
