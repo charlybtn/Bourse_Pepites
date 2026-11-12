@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
+Objectif : Trouver l'action qui stagne avant tout le monde, avec 5 voyants verts.
+Sécurité : 5 voyants stricts + Analyse fondamentale et contextuelle par Gemini.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings
 from datetime import datetime, timedelta
@@ -42,7 +44,7 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 PRIX_MAX = 80.0
-SCORE_MIN = 0  # <-- MODIFIÉ POUR LE TEST (était 70)
+SCORE_MIN = 70            # <-- REMIS À 70 POUR LA PRODUCTION
 MAX_RESULTATS = 1
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
@@ -246,6 +248,7 @@ def agent_analyse_fondamentale(titre):
             raison = g.get("raison", "")
         except Exception as e:
             log.warning(f"Gemini a échoué pour {ticker} : {e}")
+            return None
             
     if score < SCORE_MIN: return None
 
@@ -318,7 +321,8 @@ def main():
         print(f"Gemini: {'OK' if GEMINI_API_KEY else 'MANQUANT'}")
         return
 
-    if a.test or a.une_fonce if hasattr(a, 'une_fonce') else a.une_fonce:
+    # LA CORRECTION EST ICI : plus de 'une_fonce'
+    if a.test or a.une_fois:
         un_passage()
         return
 
