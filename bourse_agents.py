@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Système d'agents IA pour la bourse (PEA Fortuneo) - Chasseur de Pépites.
+Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
 Objectif : Trouver l'action qui stagne avant tout le monde, avec 5 voyants verts.
 Sécurité : 5 voyants stricts + Analyse fondamentale et contextuelle par Gemini.
 """
@@ -52,8 +52,12 @@ GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
 TAUX_REUSSITE_MIN = 0.60
 MAX_DOSSIERS = 25         
-DELAI_MEMOIRE_HEURES = 24 # <-- Nouveau : Ne pas renvoyer d'alerte pour la même action avant 24h
+DELAI_MEMOIRE_HEURES = 24 
 
+# Liste des pays éligibles au PEA
+PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
+
+# Liste de secours (Europe)
 TICKERS_SECOURS = [
     "GTT.PA", "SPIE.PA", "SW.PA", "TE.PA", "UBI.PA", "VAC.PA", "VK.PA", "AC.PA", 
     "ADP.PA", "AF.PA", "EDEN.PA", "TEP.PA", "ERF.PA", "WLN.PA", "ALO.PA", "ALT.PA", 
@@ -61,7 +65,7 @@ TICKERS_SECOURS = [
     "FR.PA", "ICAD.PA", "IPH.PA", "KOF.PA", "LI.PA", "MAU.PA", "NEX.PA", "NK.PA"
 ]
 
-SUFFIXES = (".PA", ".AS", ".BR")
+SUFFIXES = (".PA", ".AS", ".BR", ".LS", ".L", ".DE", ".F")
 PARIS = ZoneInfo("Europe/Paris")
 
 # ----------------------------------------------------------------- OUTILS
@@ -96,6 +100,17 @@ def cotation(ticker):
         if not prix or not prec: raise ValueError()
     except: raise RuntimeError(f"Cotation indisponible: {ticker}")
     return {"ticker": ticker, "prix": round(prix, 3), "var_pct": round((prix / prec - 1) * 100, 2)}
+
+def est_pea(ticker):
+    """Vérifie si l'action est éligible au PEA (via l'ISIN)."""
+    try:
+        isin = yf.Ticker(ticker).isin
+        if isin and len(isin) >= 2:
+            return "Oui" if isin[:2] in PAYS_PEA else "Non"
+    except:
+        pass
+    # Si on ne trouve pas l'ISIN, on regarde la place boursière
+    return "Oui" if ticker.endswith((".PA", ".AS", ".BR", ".LS")) else "Inconnu"
 
 def flags_serie(h):
     c, vol = h["Close"], h["Volume"]
@@ -149,7 +164,7 @@ def gemini_analyse(ticker, nom, prix, rsi):
     
     prompt = (
         f"Tu es un analyste financier expert. Analyse l'entreprise {nom} (ticker {ticker}).\n"
-        f"Le cours est actuellement de {prix} € et le RSI est de {rsi}.\n"
+        f"Le cours est actuellement de {prix} et le RSI est de {rsi}.\n"
         "1. Fais une recherche sur l'actualité récente de cette entreprise (moins d'un mois) : "
         "y a-t-il de bonnes nouvelles (contrat, résultats) ou de mauvaises (faillite, scandale) ?\n"
         "2. Donne une note fondamentale sur 100 (où 70 signifie 'solide' et 30 signifie 'dangereux').\n"
@@ -170,24 +185,25 @@ def gemini_analyse(ticker, nom, prix, rsi):
 
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
+    """Agent 1 : Cherche les pépites (Small/Mid Caps) sur toutes les places Fortuneo."""
     candidats = set()
+    
+    # On élargit aux places US (NYQ, NMS) et Europe (PAR, AMS, BRU, LON, FRA, LIS)
     q = EquityQuery('and', [
-        EquityQuery('or', [
-            EquityQuery('eq', ['region', 'fr']), EquityQuery('eq', ['region', 'de']),
-            EquityQuery('eq', ['region', 'nl']), EquityQuery('eq', ['region', 'be']),
-        ]),
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
-        EquityQuery('lt', ['intradaymarketcap', 2000000000]),
+        EquityQuery('lt', ['intradaymarketcap', 2000000000]), # < 2 Milliards (Pépites)
         EquityQuery('gt', ['avgdailyvol3m', 50000]),
-        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'GER'])
+        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'LS', 'LON', 'FRA', 'NYQ', 'NMS'])
     ])
     
     try:
-        log.info("Agent 1 : Recherche des pépites sur le marché...")
+        log.info("Agent 1 : Recherche des pépites sur les marchés (Europe + USA)...")
         res = yf.screen(q, size=50)
         for quote in res.get("quotes", []):
             sym = quote.get("symbol", "")
-            if sym.endswith(SUFFIXES): candidats.add(sym)
+            # On garde les actions (on exclut les ETFs, cryptos, etc.)
+            if quote.get("quoteType") == "EQUITY": 
+                candidats.add(sym)
         log.info(f"Agent 1 : {len(candidats)} pépites trouvées.")
     except Exception:
         log.error("Échec du screener. Bascule sur la liste de secours.")
@@ -212,8 +228,9 @@ def agent_filtre(candidats):
         
         ana.update(cot)
         ana["nom"] = ticker.split('.')[0]
+        ana["pea"] = est_pea(ticker) # Vérification PEA
         retenus.append(ana)
-        log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}€")
+        log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
         
     log.info("Agent 3 : %d titres passent le filtre technique", len(retenus))
     return retenus
@@ -259,8 +276,9 @@ def agent_mail(resultats):
         
         lignes += [
             f"=== {r['nom']} ({r['ticker']}) ===",
-            f"Prix d'entrée (Achat) : {prix_achat} €",
-            f"Objectif de sortie (Vente) : {round(prix_vente_net, 2)} € (pour viser +5% net après frais)",
+            f"Éligible PEA : {r['pea']}",
+            f"Prix d'entrée (Achat) : {prix_achat}",
+            f"Objectif de sortie (Vente) : {round(prix_vente_net, 2)} (pour viser +5% net après frais)",
             f"RSI(14)    : {r['rsi']}",
             f"Score IA   : {r['score_gemini']}/100",
             f"",
@@ -273,7 +291,7 @@ def agent_mail(resultats):
             f"",
             f"💰 PLAN D'ORDRE (à toi d'adapter selon ton budget) :",
             f"Tu peux acheter un multiple de 10 actions.",
-            f"Exemple pour 10 actions : {round(10 * prix_achat, 2)} € (hors frais).",
+            f"Exemple pour 10 actions : {round(10 * prix_achat, 2)} (hors frais).",
             ""
         ]
     try:
@@ -306,7 +324,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--test", action="store_true")
     p.add_argument("--diagnostic", action="store_true")
-    p.add_argument("--une-fois", action="store_true") # <-- Ajout pour GitHub
+    p.add_argument("--une-fois", action="store_true")
     a = p.parse_args()
 
     if a.diagnostic:
@@ -314,11 +332,11 @@ def main():
         print(f"Gemini: {'OK' if GEMINI_API_KEY else 'MANQUANT'}")
         return
 
-    if a.test or a.une_fois: # <-- Modifié ici
+    if a.test or a.une_fois:
         un_passage()
         return
 
-    # Boucle principale (pour ton PC)
+    # Boucle principale
     while True:
         n = datetime.now(PARIS)
         if n.weekday() < 5 and (9, 0) <= (n.hour, n.minute) <= (17, 30):
