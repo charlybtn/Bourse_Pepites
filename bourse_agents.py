@@ -42,7 +42,7 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 PRIX_MAX = 80.0
-SCORE_MIN = 70            
+SCORE_MIN = 0  # <-- MODIFIÉ POUR LE TEST (était 70)
 MAX_RESULTATS = 1
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
@@ -148,24 +148,14 @@ def historique_cible(h, hausse_pct):
     if not total or not durees: return 0.0, 0
     return ok / total, sorted(durees)[len(durees)//2]
 
-# ----------------------------------------------------------------- LLM (Gemini Auto-Detect)
+# ----------------------------------------------------------------- LLM (Gemini)
 def msg(role, texte): return {"role": role, "parts": [{"text": texte}]}
 
 def gemini_analyse(ticker, nom, prix, rsi):
     if not GEMINI_API_KEY: raise RuntimeError("Clé Gemini manquante")
     
-    # 1. On demande à Google la liste des modèles disponibles
-    try:
-        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
-                         headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=30)
-        r.raise_for_status()
-        noms = [m["name"].split("/")[-1] for m in r.json().get("models", [])
-                if "generateContent" in m.get("supportedGenerationMethods", [])]
-        # On ne garde que les modèles Flash (les plus rapides et gratuits)
-        modeles = [n for n in noms if "flash" in n][:5] 
-    except Exception:
-        # Si la liste échoue, on tente les classiques
-        modeles = ["gemini-1.5-flash", "gemini-2.0-flash"]
+    # MODIFICATION POUR LE TEST : On force les modèles classiques
+    modeles = ["gemini-1.5-flash", "gemini-2.0-flash"]
         
     prompt = (
         f"Tu es un analyste financier expert. Analyse l'entreprise {nom} (ticker {ticker}).\n"
@@ -176,7 +166,6 @@ def gemini_analyse(ticker, nom, prix, rsi):
         "Réponds STRICTEMENT en JSON : {\"score\": int, \"raison\": \"ton analyse en 2 phrases\"}"
     )
     
-    # 2. On teste les modèles jusqu'à ce qu'un fonctionne
     for modele in modeles:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modele}:generateContent"
         try:
@@ -258,7 +247,6 @@ def agent_analyse_fondamentale(titre):
             raison = g.get("raison", "")
         except Exception as e:
             log.warning(f"Gemini a échoué pour {ticker} : {e}")
-            return None
             
     if score < SCORE_MIN: return None
 
