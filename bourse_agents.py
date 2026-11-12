@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Objectif : Trouver l'action qui stagne avant tout le monde, avec 5 voyants verts.
-Sécurité : 5 voyants stricts + Analyse fondamentale et contextuelle par Gemini.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings
 from datetime import datetime, timedelta
@@ -54,10 +52,8 @@ TAUX_REUSSITE_MIN = 0.60
 MAX_DOSSIERS = 25         
 DELAI_MEMOIRE_HEURES = 24 
 
-# Liste des pays éligibles au PEA
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
 
-# Liste de secours (Europe)
 TICKERS_SECOURS = [
     "GTT.PA", "SPIE.PA", "SW.PA", "TE.PA", "UBI.PA", "VAC.PA", "VK.PA", "AC.PA", 
     "ADP.PA", "AF.PA", "EDEN.PA", "TEP.PA", "ERF.PA", "WLN.PA", "ALO.PA", "ALT.PA", 
@@ -102,13 +98,11 @@ def cotation(ticker):
     return {"ticker": ticker, "prix": round(prix, 3), "var_pct": round((prix / prec - 1) * 100, 2)}
 
 def est_pea(ticker):
-    """Vérifie si l'action est éligible au PEA (via l'ISIN)."""
     try:
         isin = yf.Ticker(ticker).isin
         if isin and len(isin) >= 2:
             return "Oui" if isin[:2] in PAYS_PEA else "Non"
-    except:
-        pass
+    except: pass
     return "Oui" if ticker.endswith((".PA", ".AS", ".BR", ".LS")) else "Inconnu"
 
 def flags_serie(h):
@@ -154,14 +148,25 @@ def historique_cible(h, hausse_pct):
     if not total or not durees: return 0.0, 0
     return ok / total, sorted(durees)[len(durees)//2]
 
-# ----------------------------------------------------------------- LLM (Gemini)
+# ----------------------------------------------------------------- LLM (Gemini Auto-Detect)
 def msg(role, texte): return {"role": role, "parts": [{"text": texte}]}
 
 def gemini_analyse(ticker, nom, prix, rsi):
     if not GEMINI_API_KEY: raise RuntimeError("Clé Gemini manquante")
-    # On privilégie le modèle le plus récent (2.0) avec l'ancien en secours
-    modeles = ["gemini-2.0-flash", "gemini-1.5-flash"]
     
+    # 1. On demande à Google la liste des modèles disponibles
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+                         headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=30)
+        r.raise_for_status()
+        noms = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])]
+        # On ne garde que les modèles Flash (les plus rapides et gratuits)
+        modeles = [n for n in noms if "flash" in n][:5] 
+    except Exception:
+        # Si la liste échoue, on tente les classiques
+        modeles = ["gemini-1.5-flash", "gemini-2.0-flash"]
+        
     prompt = (
         f"Tu es un analyste financier expert. Analyse l'entreprise {nom} (ticker {ticker}).\n"
         f"Le cours est actuellement de {prix} et le RSI est de {rsi}.\n"
@@ -171,6 +176,7 @@ def gemini_analyse(ticker, nom, prix, rsi):
         "Réponds STRICTEMENT en JSON : {\"score\": int, \"raison\": \"ton analyse en 2 phrases\"}"
     )
     
+    # 2. On teste les modèles jusqu'à ce qu'un fonctionne
     for modele in modeles:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modele}:generateContent"
         try:
@@ -181,7 +187,7 @@ def gemini_analyse(ticker, nom, prix, rsi):
         except Exception as e:
             log.debug(f"Gemini {modele} fail: {e}")
             continue
-    raise RuntimeError("Gemini indisponible")
+    raise RuntimeError("Tous les modèles Gemini ont échoué")
 
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
