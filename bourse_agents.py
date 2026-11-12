@@ -109,7 +109,6 @@ def est_pea(ticker):
             return "Oui" if isin[:2] in PAYS_PEA else "Non"
     except:
         pass
-    # Si on ne trouve pas l'ISIN, on regarde la place boursière
     return "Oui" if ticker.endswith((".PA", ".AS", ".BR", ".LS")) else "Inconnu"
 
 def flags_serie(h):
@@ -185,13 +184,10 @@ def gemini_analyse(ticker, nom, prix, rsi):
 
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
-    """Agent 1 : Cherche les pépites (Small/Mid Caps) sur toutes les places Fortuneo."""
     candidats = set()
-    
-    # On élargit aux places US (NYQ, NMS) et Europe (PAR, AMS, BRU, LON, FRA, LIS)
     q = EquityQuery('and', [
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
-        EquityQuery('lt', ['intradaymarketcap', 2000000000]), # < 2 Milliards (Pépites)
+        EquityQuery('lt', ['intradaymarketcap', 2000000000]),
         EquityQuery('gt', ['avgdailyvol3m', 50000]),
         EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'LS', 'LON', 'FRA', 'NYQ', 'NMS'])
     ])
@@ -201,7 +197,6 @@ def agent_actualites():
         res = yf.screen(q, size=50)
         for quote in res.get("quotes", []):
             sym = quote.get("symbol", "")
-            # On garde les actions (on exclut les ETFs, cryptos, etc.)
             if quote.get("quoteType") == "EQUITY": 
                 candidats.add(sym)
         log.info(f"Agent 1 : {len(candidats)} pépites trouvées.")
@@ -228,7 +223,7 @@ def agent_filtre(candidats):
         
         ana.update(cot)
         ana["nom"] = ticker.split('.')[0]
-        ana["pea"] = est_pea(ticker) # Vérification PEA
+        ana["pea"] = est_pea(ticker)
         retenus.append(ana)
         log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
         
@@ -238,14 +233,11 @@ def agent_filtre(candidats):
 def agent_analyse_fondamentale(titre):
     ticker = titre["ticker"]
     
-    # --- VÉRIFICATION DE LA MÉMOIRE (Anti-Spam) ---
     memoire = lire_json(MEMOIRE, {})
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
         if datetime.now() - derniere_alerte < timedelta(hours=DELAI_MEMOIRE_HEURES):
-            log.info(f"  -> {ticker} ignoré (déjà alerté il y a moins de {DELAI_MEMOIRE_HEURES}h)")
             return None
-    # ---------------------------------------------
 
     taux, duree = historique_cible(titre["_h"], GAIN_NET_PCT)
     if taux < TAUX_REUSSITE_MIN: return None
@@ -258,7 +250,10 @@ def agent_analyse_fondamentale(titre):
             score = int(g.get("score", 0))
             raison = g.get("raison", "")
         except Exception as e:
-            log.warning(f"Gemini {ticker}: {e}")
+            # PROTECTION ANTI-CRASH : Si Gemini plante (quota épuisé, etc.), 
+            # on ignore l'action au lieu de faire planter tout le programme.
+            log.warning(f"Gemini a échoué pour {ticker} : {e}")
+            return None
             
     if score < SCORE_MIN: return None
 
@@ -296,7 +291,6 @@ def agent_mail(resultats):
         ]
     try:
         envoyer_mail("PÉPITE Bourse — Opportunité", "\n".join(lignes))
-        # Mise à jour de la mémoire après l'envoi réussi
         memoire = lire_json(MEMOIRE, {})
         for r in best:
             memoire[r["ticker"]] = datetime.now().isoformat()
