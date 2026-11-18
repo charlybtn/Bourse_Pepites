@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Méthode : 5 voyants stricts + Analyse fondamentale locale (Piotroski & Altman).
-Sécurité : 100% autonome, aucun service externe (pas d'API Gemini/Groq).
+Objectif : Trouver 1 pépite par semaine avec 5 voyants stricts (assouplis) + santé financière.
 """
-import argparse, json, logging, math, os, smtplib, sys, time, warnings
+import argparse, json, logging, math, os, re, smtplib, sys, time, warnings
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -38,19 +37,18 @@ def charger_env():
 
 charger_env()
 
-# Gmail reste nécessaire pour t'envoyer le mail
 DEST_EMAIL = os.getenv("DEST_EMAIL") or os.getenv("GMAIL_USER") or "charlybotton85600@gmail.com"
 GMAIL_USER = os.getenv("GMAIL_USER") or DEST_EMAIL
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
 PRIX_MAX = 80.0
-SCORE_MIN = 70            # Le score minimum pour valider l'achat (sur 100)
+SCORE_MIN = 65            # Note minimale de santé financière (sur 100)
 MAX_RESULTATS = 1
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
-TAUX_REUSSITE_MIN = 0.60
+TAUX_REUSSITE_MIN = 0.50  # BAISSÉ : 50% de réussite au lieu de 60%
 MAX_DOSSIERS = 25         
 DELAI_MEMOIRE_HEURES = 24 
 
@@ -119,8 +117,8 @@ def flags_serie(h):
     repli = c / c.rolling(20).max() - 1
     f = {
         "tendance": (c > c.rolling(200).mean()).fillna(False),
-        "repli": ((var5 <= 0.01) & (repli >= -0.10)).fillna(False),
-        "rsi": rsi.between(30, 55).fillna(False),
+        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False), # ASSOUPLI à -15%
+        "rsi": rsi.between(30, 60).fillna(False),                  # ASSOUPLI à 60
         "macd": ((hist > hist.shift(1)) & (hist.shift(1) > hist.shift(2))).fillna(False),
         "volume": (vol.rolling(20).mean() >= 100000).fillna(False),
     }
@@ -150,58 +148,41 @@ def historique_cible(h, hausse_pct):
     if not total or not durees: return 0.0, 0
     return ok / total, sorted(durees)[len(durees)//2]
 
-# ----------------------------------------------------------------- ANALYSE FONDAMENTALE LOCALE
+# ----------------------------------------------------------------- SANTÉ FINANCIÈRE LOCALE
 def calculer_score_local(ticker):
-    """Calcule un score financier local sans IA (basé sur le F-Score et le Z-Score)."""
     try:
         t = yf.Ticker(ticker)
         bilan = t.balance_sheet
         resultat = t.income_stmt
         tresorerie = t.cashflow
         
-        # Sécurité : Si les données sont vides ou trop courtes, on rejette
         if bilan.empty or resultat.empty or tresorerie.empty or len(bilan.columns) < 2:
-            return 0, "Données financières insuffisantes"
+            return 50, "Données financières insuffisantes (neutre)" # Neutre si on ne sait pas
             
-        # Sécurité : On vérifie que les lignes clés existent
-        lignes_requises = ['Total Assets', 'Current Assets', 'Current Liabilities', 'Ordinary Shares Number', 'Long Term Debt']
-        for l in lignes_requises:
-            if l not in bilan.index: return 0, f"Donnée bilan manquante: {l}"
-            
+        lignes_bilan = ['Total Assets', 'Current Assets', 'Current Liabilities', 'Ordinary Shares Number', 'Long Term Debt']
+        if any(l not in bilan.index for l in lignes_bilan): return 50, "Bilan incomplet (neutre)"
         lignes_res = ['Net Income', 'Gross Profit', 'Total Revenue', 'EBIT']
-        for l in lignes_res:
-            if l not in resultat.index: return 0, f"Donnée résultat manquante: {l}"
+        if any(l not in resultat.index for l in lignes_res): return 50, "Résultats incomplets (neutre)"
 
-        # --- CALCUL DU PIOTROSKI F-SCORE (sur 9) ---
         score_f = 0
-        # 1. ROA positif
         if resultat.loc['Net Income'].iloc[0] / bilan.loc['Total Assets'].iloc[0] > 0: score_f += 1
-        # 2. Cash-flow opérationnel positif
         if 'Operating Cash Flow' in tresorerie.index and tresorerie.loc['Operating Cash Flow'].iloc[0] > 0: score_f += 1
-        # 3. ROA en amélioration
         roa = resultat.loc['Net Income'].iloc[0] / bilan.loc['Total Assets'].iloc[0]
         roa_prec = resultat.loc['Net Income'].iloc[1] / bilan.loc['Total Assets'].iloc[1]
         if roa > roa_prec: score_f += 1
-        # 4. Cash-flow > Bénéfice net
         if 'Operating Cash Flow' in tresorerie.index and tresorerie.loc['Operating Cash Flow'].iloc[0] > resultat.loc['Net Income'].iloc[0]: score_f += 1
-        # 5. Baisse de la dette long terme
         if bilan.loc['Long Term Debt'].iloc[0] < bilan.loc['Long Term Debt'].iloc[1]: score_f += 1
-        # 6. Ratio de liquidité en hausse
         cr = bilan.loc['Current Assets'].iloc[0] / bilan.loc['Current Liabilities'].iloc[0]
         cr_prec = bilan.loc['Current Assets'].iloc[1] / bilan.loc['Current Liabilities'].iloc[1]
         if cr > cr_prec: score_f += 1
-        # 7. Pas de dilution
         if bilan.loc['Ordinary Shares Number'].iloc[0] <= bilan.loc['Ordinary Shares Number'].iloc[1]: score_f += 1
-        # 8. Marge brute en hausse
         marge = resultat.loc['Gross Profit'].iloc[0] / resultat.loc['Total Revenue'].iloc[0]
         marge_prec = resultat.loc['Gross Profit'].iloc[1] / resultat.loc['Total Revenue'].iloc[1]
         if marge > marge_prec: score_f += 1
-        # 9. Rotation des actifs en hausse
         rot = resultat.loc['Total Revenue'].iloc[0] / bilan.loc['Total Assets'].iloc[0]
         rot_prec = resultat.loc['Total Revenue'].iloc[1] / bilan.loc['Total Assets'].iloc[1]
         if rot > rot_prec: score_f += 1
 
-        # --- CALCUL DE L'ALTMAN Z-SCORE ---
         fonds_roulement = bilan.loc['Current Assets'].iloc[0] - bilan.loc['Current Liabilities'].iloc[0]
         z_score = (
             6.56 * (fonds_roulement / bilan.loc['Total Assets'].iloc[0]) +
@@ -210,23 +191,18 @@ def calculer_score_local(ticker):
             1.05 * (bilan.loc['Total Equity Gross Minority Interest'].iloc[0] / bilan.loc['Total Liabilities Net Minority Interest'].iloc[0])
         )
 
-        # --- VERDICT (Note sur 100) ---
-        if score_f >= 7 and z_score > 2.99:
-            return 90, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Solide)"
-        elif score_f >= 5 and z_score > 1.81:
-            return 65, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Moyen)"
-        else:
-            return 30, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Risqué)"
-
+        if score_f >= 7 and z_score > 2.99: return 90, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Solide)"
+        elif score_f >= 5 and z_score > 1.81: return 65, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Moyen)"
+        else: return 30, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Risqué)"
     except Exception as e:
-        return 0, f"Erreur de calcul : {str(e)[:50]}"
+        return 50, "Erreur de calcul (neutre)"
 
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
     q = EquityQuery('and', [
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
-        EquityQuery('lt', ['intradaymarketcap', 2000000000]),
+        EquityQuery('lt', ['intradaymarketcap', 3000000000]), # ÉLARGI à 3 Milliards
         EquityQuery('gt', ['avgdailyvol3m', 50000]),
         EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS'])
     ])
@@ -272,7 +248,6 @@ def agent_filtre(candidats):
 def agent_analyse_fondamentale(titre):
     ticker = titre["ticker"]
     
-    # VÉRIFICATION DE LA MÉMOIRE
     memoire = lire_json(MEMOIRE, {})
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
@@ -282,17 +257,16 @@ def agent_analyse_fondamentale(titre):
     taux, duree = historique_cible(titre["_h"], GAIN_NET_PCT)
     if taux < TAUX_REUSSITE_MIN: return None
 
-    # REMPLACEMENT DE GEMINI PAR LE CALCUL LOCAL
     score, raison = calculer_score_local(ticker)
-    log.info(f"  -> {ticker} analyse fondamentale : {raison}")
-    
-    if score < SCORE_MIN: return None
+    if score < SCORE_MIN: 
+        log.info(f"  -> {ticker} rejeté par l'analyse financière : {raison}")
+        return None
 
-    return {**titre, "score_ia": score, "raison_ia": raison, "taux_hist": round(taux*100, 1), "duree_hist": duree}
+    return {**titre, "score_fin": score, "raison_fin": raison, "taux_hist": round(taux*100, 1), "duree_hist": duree}
 
 def agent_mail(resultats):
     if not resultats: return False
-    best = sorted(resultats, key=lambda r: r["score_ia"], reverse=True)[:MAX_RESULTATS]
+    best = sorted(resultats, key=lambda r: r["score_fin"], reverse=True)[:MAX_RESULTATS]
     
     lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite détectée aujourd'hui :\n"]
     for r in best:
@@ -306,10 +280,10 @@ def agent_mail(resultats):
             f"Prix d'entrée (Achat) : {prix_achat}",
             f"Objectif de sortie (Vente) : {round(prix_vente_net, 2)} (pour viser +5% net après frais)",
             f"RSI(14)    : {r['rsi']}",
-            f"Score IA   : {r['score_ia']}/100",
+            f"Score financier : {r['score_fin']}/100",
             f"",
             f"💡 L'analyse financière (Piotroski / Altman) :",
-            f"{r['raison_ia']}",
+            f"{r['raison_fin']}",
             f"",
             f"📊 Historique de l'action :",
             f"Cette action a atteint cet objectif de +5% dans {r['taux_hist']}% des cas sur l'année passée.",
