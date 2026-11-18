@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Objectif : Trouver 1 pépite par semaine avec 5 voyants stricts (assouplis) + santé financière.
+Système d'agents IA pour la bourse - Chasseur de Pépites.
+Version de test : logs détaillés pour comprendre les rejets.
 """
-import argparse, json, logging, math, os, re, smtplib, sys, time, warnings
+import argparse, json, logging, math, os, smtplib, sys, time, warnings
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -42,13 +42,13 @@ GMAIL_USER = os.getenv("GMAIL_USER") or DEST_EMAIL
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
 PRIX_MAX = 80.0
-SCORE_MIN = 65            # Note minimale de santé financière (sur 100)
+SCORE_MIN = 50            # BAISSÉ À 50 POUR LE TEST (au lieu de 65)
 MAX_RESULTATS = 1
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
-TAUX_REUSSITE_MIN = 0.50  # BAISSÉ : 50% de réussite au lieu de 60%
+TAUX_REUSSITE_MIN = 0.40  # BAISSÉ À 40% POUR LE TEST (au lieu de 50%)
 MAX_DOSSIERS = 25         
 DELAI_MEMOIRE_HEURES = 24 
 
@@ -117,8 +117,8 @@ def flags_serie(h):
     repli = c / c.rolling(20).max() - 1
     f = {
         "tendance": (c > c.rolling(200).mean()).fillna(False),
-        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False), # ASSOUPLI à -15%
-        "rsi": rsi.between(30, 60).fillna(False),                  # ASSOUPLI à 60
+        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False),
+        "rsi": rsi.between(30, 60).fillna(False),
         "macd": ((hist > hist.shift(1)) & (hist.shift(1) > hist.shift(2))).fillna(False),
         "volume": (vol.rolling(20).mean() >= 100000).fillna(False),
     }
@@ -157,7 +157,7 @@ def calculer_score_local(ticker):
         tresorerie = t.cashflow
         
         if bilan.empty or resultat.empty or tresorerie.empty or len(bilan.columns) < 2:
-            return 50, "Données financières insuffisantes (neutre)" # Neutre si on ne sait pas
+            return 50, "Données financières insuffisantes (neutre)"
             
         lignes_bilan = ['Total Assets', 'Current Assets', 'Current Liabilities', 'Ordinary Shares Number', 'Long Term Debt']
         if any(l not in bilan.index for l in lignes_bilan): return 50, "Bilan incomplet (neutre)"
@@ -202,7 +202,7 @@ def agent_actualites():
     candidats = set()
     q = EquityQuery('and', [
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
-        EquityQuery('lt', ['intradaymarketcap', 3000000000]), # ÉLARGI à 3 Milliards
+        EquityQuery('lt', ['intradaymarketcap', 3000000000]),
         EquityQuery('gt', ['avgdailyvol3m', 50000]),
         EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS'])
     ])
@@ -248,18 +248,26 @@ def agent_filtre(candidats):
 def agent_analyse_fondamentale(titre):
     ticker = titre["ticker"]
     
+    # 1. Mémoire
     memoire = lire_json(MEMOIRE, {})
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
         if datetime.now() - derniere_alerte < timedelta(hours=DELAI_MEMOIRE_HEURES):
+            log.info(f"  -> {ticker} ignoré : déjà alerté récemment.")
             return None
 
+    # 2. Historique (Log ajouté)
     taux, duree = historique_cible(titre["_h"], GAIN_NET_PCT)
-    if taux < TAUX_REUSSITE_MIN: return None
+    log.info(f"  -> {ticker} taux de réussite historique : {taux*100:.1f}%")
+    if taux < TAUX_REUSSITE_MIN: 
+        log.info(f"  -> {ticker} rejeté : taux historique trop faible.")
+        return None
 
+    # 3. Score Financier (Log ajouté)
     score, raison = calculer_score_local(ticker)
+    log.info(f"  -> {ticker} score financier : {score}/100 ({raison})")
     if score < SCORE_MIN: 
-        log.info(f"  -> {ticker} rejeté par l'analyse financière : {raison}")
+        log.info(f"  -> {ticker} rejeté : score financier < {SCORE_MIN}.")
         return None
 
     return {**titre, "score_fin": score, "raison_fin": raison, "taux_hist": round(taux*100, 1), "duree_hist": duree}
@@ -315,7 +323,11 @@ def un_passage():
         r = agent_analyse_fondamentale(t)
         if r: resultats.append(r)
         
-    if resultats: agent_mail(resultats)
+    if resultats: 
+        agent_mail(resultats)
+    else:
+        log.info("Aucune action n'a passé tous les filtres (ou l'envoi de mail a échoué).")
+        
     log.info("Passage terminé — %d propositions", len(resultats))
 
 # ----------------------------------------------------------------- MAIN
