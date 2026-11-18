@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Système d'agents IA pour la bourse - Chasseur de Pépites.
-Version de test : logs détaillés pour comprendre les rejets.
+Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
+Objectif : 1 pépite par semaine, avec mémoire persistante sur GitHub.
 """
-import argparse, json, logging, math, os, smtplib, sys, time, warnings
+import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -41,14 +41,22 @@ DEST_EMAIL = os.getenv("DEST_EMAIL") or os.getenv("GMAIL_USER") or "charlybotton
 GMAIL_USER = os.getenv("GMAIL_USER") or DEST_EMAIL
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
+# Variables pour la mémoire GitHub
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
+GITHUB_HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json"
+}
+
 PRIX_MAX = 80.0
-SCORE_MIN = 50            # BAISSÉ À 50 POUR LE TEST (au lieu de 65)
+SCORE_MIN = 65            
 MAX_RESULTATS = 1
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
-TAUX_REUSSITE_MIN = 0.40  # BAISSÉ À 40% POUR LE TEST (au lieu de 50%)
+TAUX_REUSSITE_MIN = 0.50  
 MAX_DOSSIERS = 25         
 DELAI_MEMOIRE_HEURES = 24 
 
@@ -65,13 +73,6 @@ SUFFIXES = (".PA", ".AS", ".BR", ".LS", ".L", ".DE", ".F")
 PARIS = ZoneInfo("Europe/Paris")
 
 # ----------------------------------------------------------------- OUTILS
-def lire_json(f, defaut):
-    try: return json.loads(f.read_text(encoding="utf-8")) if f.exists() else defaut
-    except: return defaut
-
-def ecrire_json(f, data):
-    f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-
 def envoyer_mail(sujet, corps):
     if not GMAIL_APP_PASSWORD: raise RuntimeError("Mot de passe Gmail manquant")
     m = EmailMessage()
@@ -81,6 +82,48 @@ def envoyer_mail(sujet, corps):
         s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         s.send_message(m)
     log.info("Mail envoyé : %s", sujet)
+
+# ----------------------------------------------------------------- MÉMOIRE GITHUB
+def lire_memoire_github():
+    """Lit le fichier de mémoire depuis GitHub (s'il existe)."""
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        return {}
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/memoire_alertes.json"
+    r = requests.get(url, headers=GITHUB_HEADERS)
+    if r.status_code == 404:
+        return {}
+    if r.status_code == 200:
+        contenu = base64.b64decode(r.json()["content"]).decode("utf-8")
+        return json.loads(contenu)
+    return {}
+
+def mettre_a_jour_memoire_github(ticker):
+    """Met à jour la mémoire sur GitHub. Crée le fichier ou le met à jour."""
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        return
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/memoire_alertes.json"
+    memoire = lire_memoire_github()
+    memoire[ticker] = datetime.now().isoformat()
+    
+    contenu_encode = base64.b64encode(json.dumps(memoire, indent=1).encode("utf-8")).decode("utf-8")
+    
+    # On vérifie si le fichier existe déjà (pour avoir son SHA)
+    r = requests.get(url, headers=GITHUB_HEADERS)
+    sha = r.json().get("sha") if r.status_code == 200 else None
+    
+    payload = {
+        "message": f"Mise à jour mémoire: {ticker}",
+        "content": contenu_encode,
+        "branch": "main"
+    }
+    if sha:
+        payload["sha"] = sha
+        
+    r = requests.put(url, headers=GITHUB_HEADERS, json=payload)
+    if r.status_code in (200, 201):
+        log.info(f"Mémoire GitHub mise à jour pour {ticker}.")
+    else:
+        log.error(f"Erreur mise à jour mémoire GitHub : {r.status_code}")
 
 # ----------------------------------------------------------------- FRAIS
 def frais(montant):
@@ -248,22 +291,22 @@ def agent_filtre(candidats):
 def agent_analyse_fondamentale(titre):
     ticker = titre["ticker"]
     
-    # 1. Mémoire
-    memoire = lire_json(MEMOIRE, {})
+    # 1. LECTURE DE LA MÉMOIRE GITHUB
+    memoire = lire_memoire_github()
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
         if datetime.now() - derniere_alerte < timedelta(hours=DELAI_MEMOIRE_HEURES):
             log.info(f"  -> {ticker} ignoré : déjà alerté récemment.")
             return None
 
-    # 2. Historique (Log ajouté)
+    # 2. Historique
     taux, duree = historique_cible(titre["_h"], GAIN_NET_PCT)
     log.info(f"  -> {ticker} taux de réussite historique : {taux*100:.1f}%")
     if taux < TAUX_REUSSITE_MIN: 
         log.info(f"  -> {ticker} rejeté : taux historique trop faible.")
         return None
 
-    # 3. Score Financier (Log ajouté)
+    # 3. Score Financier
     score, raison = calculer_score_local(ticker)
     log.info(f"  -> {ticker} score financier : {score}/100 ({raison})")
     if score < SCORE_MIN: 
@@ -304,11 +347,9 @@ def agent_mail(resultats):
         ]
     try:
         envoyer_mail("PÉPITE Bourse — Opportunité", "\n".join(lignes))
-        memoire = lire_json(MEMOIRE, {})
+        # Mise à jour de la mémoire sur GitHub après l'envoi
         for r in best:
-            memoire[r["ticker"]] = datetime.now().isoformat()
-        ecrire_json(MEMOIRE, memoire)
-        
+            mettre_a_jour_memoire_github(r["ticker"])
         return True
     except Exception as e:
         log.error(f"Erreur mail: {e}")
