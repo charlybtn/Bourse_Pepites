@@ -19,9 +19,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
         
-      - name: Run script
+            - name: Run script
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python bourse_agents.py --une-fois 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python bourse_agents.py --une-fois
