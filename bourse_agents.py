@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Version 300 dossiers : Filtres stricts + Anti-sommet (exclut les actions déjà montées).
+Système d'agents IA pour la bourse - Chasseur de Pépites (Europe uniquement).
+Version : Recherche ciblée sur les places européennes + Filtres stricts.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -59,14 +59,17 @@ DELAI_MEMOIRE_HEURES = 24
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
 
+# Liste de secours (valeurs européennes sûres)
 TICKERS_SECOURS = [
     "GTT.PA", "SPIE.PA", "SW.PA", "TE.PA", "UBI.PA", "VAC.PA", "VK.PA", "AC.PA", 
     "ADP.PA", "AF.PA", "EDEN.PA", "TEP.PA", "ERF.PA", "WLN.PA", "ALO.PA", "ALT.PA", 
-    "ALTA.PA", "AMS.PA", "ATO.PA", "BB.PA", "BOL.PA", "BVI.PA", "CGG.PA", "FDJ.PA", 
-    "FR.PA", "ICAD.PA", "IPH.PA", "KOF.PA", "LI.PA", "MAU.PA", "NEX.PA", "NK.PA"
+    "ALTA.PA", "ATO.PA", "BB.PA", "BOL.PA", "BVI.PA", "FR.PA", "ICAD.PA", "IPH.PA", 
+    "KOF.PA", "LI.PA", "MAU.PA", "NEX.PA", "NK.PA", "RXL.PA", "SK.PA", "SO.PA",
+    "ASML.AS", "AD.AS", "PHIA.AS", "HEIA.AS", "ABI.BR", "KBC.BR", "UCB.BR"
 ]
 
-SUFFIXES = (".PA", ".AS", ".BR", ".LS", ".L", ".DE", ".F")
+# On ne garde que les suffixes européens
+SUFFIXES = (".PA", ".AS", ".BR", ".DE", ".F", ".MI", ".MC", ".LS")
 PARIS = ZoneInfo("Europe/Paris")
 
 # ----------------------------------------------------------------- OUTILS
@@ -136,7 +139,7 @@ def infos_entreprise(ticker):
         pea = "Inconnu"
         if isin and len(isin) >= 2:
             pea = "Oui" if isin[:2] in PAYS_PEA else "Non"
-        elif ticker.endswith((".PA", ".AS", ".BR", ".LS")):
+        elif ticker.endswith((".PA", ".AS", ".BR", ".LS", ".DE", ".F", ".MI", ".MC")):
             pea = "Oui"
             
         return nom, isin, pea
@@ -155,8 +158,8 @@ def flags_serie(h):
     repli = c / c.rolling(20).max() - 1
     f = {
         "tendance": (c > c.rolling(200).mean()).fillna(False),
-        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False),  # STRICT : -15%
-        "rsi": rsi.between(30, 60).fillna(False),                    # STRICT : 60
+        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False),
+        "rsi": rsi.between(30, 60).fillna(False),
         "macd": ((hist > hist.shift(1)) & (hist.shift(1) > hist.shift(2))).fillna(False),
         "volume": (vol.rolling(20).mean() >= 100000).fillna(False),
     }
@@ -233,42 +236,36 @@ def calculer_score_local(ticker):
 def agent_actualites():
     candidats = set()
     
-    # FILTRES YAHOO (SANS profitmargins qui fait planter l'API)
+    # SCREENER 100% EUROPÉEN
     q = EquityQuery('and', [
-        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS']),
+        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'GER', 'MIL', 'MCE', 'LIS']),
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
         EquityQuery('gt', ['intradayprice', 1.0]),
         EquityQuery('lt', ['intradaymarketcap', 3000000000]),
         EquityQuery('gt', ['intradaymarketcap', 50000000]),
-        EquityQuery('gt', ['avgdailyvol3m', 100000]),
-        EquityQuery('gt', ['epsgrowth.lasttwelvemonths', 10]),
-        EquityQuery('gt', ['totalrevenues1yrgrowth.lasttwelvemonths', 10]),
-        
-        # FILTRES ANTI-SOMMET
-        EquityQuery('lt', ['fiftytwowkpercentchange', 50]),           
-        EquityQuery('lt', ['percentchange', 5]),                      
-        EquityQuery('lt', ['lastclose52weekhigh.lasttwelvemonths', 0.90]) 
+        EquityQuery('gt', ['avgdailyvol3m', 100000])
     ])
     
-    # 6 PAGES DE 50 = 300 ENTREPRISES
     for page in range(6):
         offset = page * 50
         try:
-            log.info(f"Agent 1 : Recherche des pépites (page {page + 1}/6)...")
+            log.info(f"Agent 1 : Recherche des pépites européennes (page {page + 1}/6)...")
             res = yf.screen(q, size=50, offset=offset, sortField='intradaymarketcap', sortAsc=False)
             for quote in res.get("quotes", []):
                 sym = quote.get("symbol", "")
-                if quote.get("quoteType") == "EQUITY": candidats.add(sym)
+                # On ne garde que les actions avec un suffixe européen valide
+                if quote.get("quoteType") == "EQUITY" and sym.endswith(SUFFIXES): 
+                    candidats.add(sym)
         except Exception as e:
             log.error(f"Échec du screener (page {page + 1}, offset {offset}) : {e}")
         
         if page < 5:
             time.sleep(4)
     
-    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées (anti-sommet).")
+    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées en Europe.")
     
     if not candidats: 
-        log.warning("Aucune pépite trouvée avec les filtres stricts, utilisation de la liste de secours.")
+        log.warning("Aucune pépite trouvée, utilisation de la liste de secours.")
         candidats.update(TICKERS_SECOURS)
     return list(candidats)
 
@@ -315,7 +312,7 @@ def agent_mail(resultats):
     if not resultats: return False
     best = sorted(resultats, key=lambda r: r["score_fin"], reverse=True)[:MAX_RESULTATS]
     
-    lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite détectée aujourd'hui :\n"]
+    lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite européenne détectée aujourd'hui :\n"]
     for r in best:
         nom_complet, isin, pea = infos_entreprise(r['ticker'])
         prix_achat = r["prix"]
@@ -328,7 +325,7 @@ def agent_mail(resultats):
             f"💡 Analyse : {r['raison_fin']}"
         ]
     try:
-        envoyer_mail("PÉPITE Bourse — Opportunité", "\n".join(lignes))
+        envoyer_mail("PÉPITE Bourse — Opportunité Européenne", "\n".join(lignes))
         for r in best: mettre_a_jour_memoire_github(r["ticker"])
         return True
     except Exception as e:
