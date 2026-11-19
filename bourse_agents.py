@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Analyse locale (Piotroski & Altman) + Mémoire persistante sur GitHub.
+Version : Screener Yahoo "aggressive_small_caps" + Mail ultra-concis.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -39,7 +39,6 @@ DEST_EMAIL = os.getenv("DEST_EMAIL") or os.getenv("GMAIL_USER") or "charlybotton
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
-# Variables pour la mémoire GitHub
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 GITHUB_HEADERS = {
@@ -49,13 +48,13 @@ GITHUB_HEADERS = {
 
 PRIX_MAX = 80.0
 SCORE_MIN = 65            
-MAX_RESULTATS = 1
+MAX_RESULTATS = 1         
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
 TAUX_REUSSITE_MIN = 0.50  
-MAX_DOSSIERS = 25         
+MAX_DOSSIERS = 200        
 DELAI_MEMOIRE_HEURES = 24 
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
@@ -112,7 +111,7 @@ def mettre_a_jour_memoire_github(ticker):
     if r.status_code in (200, 201):
         log.info(f"Mémoire GitHub mise à jour pour {ticker}.")
     else:
-        log.error(f"Erreur mise à jour mémoire GitHub : {r.status_code} - {r.text}")
+        log.error(f"Erreur mise à jour mémoire GitHub : {r.status_code}")
 
 # ----------------------------------------------------------------- FRAIS & TECHNIQUE
 def frais(montant):
@@ -128,13 +127,23 @@ def cotation(ticker):
     except: raise RuntimeError(f"Cotation indisponible: {ticker}")
     return {"ticker": ticker, "prix": round(prix, 3), "var_pct": round((prix / prec - 1) * 100, 2)}
 
-def est_pea(ticker):
+def infos_entreprise(ticker):
+    """Récupère le nom complet et l'ISIN pour le mail."""
     try:
-        isin = yf.Ticker(ticker).isin
+        t = yf.Ticker(ticker)
+        nom = t.info.get("longName") or t.info.get("shortName") or ticker
+        isin = t.isin if hasattr(t, 'isin') else "Inconnu"
+        
+        # Vérification PEA
+        pea = "Inconnu"
         if isin and len(isin) >= 2:
-            return "Oui" if isin[:2] in PAYS_PEA else "Non"
-    except: pass
-    return "Oui" if ticker.endswith((".PA", ".AS", ".BR", ".LS")) else "Inconnu"
+            pea = "Oui" if isin[:2] in PAYS_PEA else "Non"
+        elif ticker.endswith((".PA", ".AS", ".BR", ".LS")):
+            pea = "Oui"
+            
+        return nom, isin, pea
+    except:
+        return ticker, "Inconnu", "Inconnu"
 
 def flags_serie(h):
     c, vol = h["Close"], h["Volume"]
@@ -185,12 +194,12 @@ def calculer_score_local(ticker):
         bilan, resultat, tresorerie = t.balance_sheet, t.income_stmt, t.cashflow
         
         if bilan.empty or resultat.empty or tresorerie.empty or len(bilan.columns) < 2:
-            return 50, "Données financières insuffisantes (neutre)"
+            return 50, "Données financières insuffisantes."
             
         lignes_bilan = ['Total Assets', 'Current Assets', 'Current Liabilities', 'Ordinary Shares Number', 'Long Term Debt']
-        if any(l not in bilan.index for l in lignes_bilan): return 50, "Bilan incomplet (neutre)"
+        if any(l not in bilan.index for l in lignes_bilan): return 50, "Bilan incomplet."
         lignes_res = ['Net Income', 'Gross Profit', 'Total Revenue', 'EBIT']
-        if any(l not in resultat.index for l in lignes_res): return 50, "Résultats incomplets (neutre)"
+        if any(l not in resultat.index for l in lignes_res): return 50, "Résultats incomplets."
 
         score_f = 0
         if resultat.loc['Net Income'].iloc[0] / bilan.loc['Total Assets'].iloc[0] > 0: score_f += 1
@@ -217,38 +226,39 @@ def calculer_score_local(ticker):
                    6.72 * (resultat.loc['EBIT'].iloc[0] / bilan.loc['Total Assets'].iloc[0]) +
                    1.05 * (bilan.loc['Total Equity Gross Minority Interest'].iloc[0] / bilan.loc['Total Liabilities Net Minority Interest'].iloc[0]))
 
-        if score_f >= 7 and z_score > 2.99: return 90, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Solide)"
-        elif score_f >= 5 and z_score > 1.81: return 65, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Moyen)"
-        else: return 30, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Risqué)"
-    except: return 50, "Erreur de calcul (neutre)"
+        if score_f >= 7 and z_score > 2.99: return 90, f"Très solide (F-Score {score_f}/9)."
+        elif score_f >= 5 and z_score > 1.81: return 65, f"Rentable et saine (F-Score {score_f}/9)."
+        else: return 30, f"Risqué (F-Score {score_f}/9)."
+    except: return 50, "Analyse indisponible."
 
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
-    q = EquityQuery('and', [
-        EquityQuery('lt', ['intradayprice', PRIX_MAX]),
-        EquityQuery('lt', ['intradaymarketcap', 3000000000]),
-        EquityQuery('gt', ['avgdailyvol3m', 50000]),
-        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS'])
-    ])
+    log.info("Agent 1 : Recherche via le screener 'aggressive_small_caps' de Yahoo...")
     
-    try:
-        log.info("Agent 1 : Recherche des pépites...")
-        res = yf.screen(q, size=50)
-        for quote in res.get("quotes", []):
-            sym = quote.get("symbol", "")
-            if quote.get("quoteType") == "EQUITY": candidats.add(sym)
-        log.info(f"Agent 1 : {len(candidats)} pépites trouvées.")
-    except Exception as e:
-        log.error(f"Échec du screener : {e}")
+    for page in range(4):
+        offset = page * 50
+        try:
+            res = yf.screen("aggressive_small_caps", size=50, offset=offset)
+            for quote in res.get("quotes", []):
+                sym = quote.get("symbol", "")
+                if quote.get("quoteType") == "EQUITY": candidats.add(sym)
+        except Exception as e:
+            log.error(f"Échec du screener (page {page + 1}) : {e}")
+        if page < 3: time.sleep(5)
     
-    if not candidats: candidats.update(TICKERS_SECOURS)
+    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées.")
+    if not candidats: 
+        candidats.update(TICKERS_SECOURS)
     return list(candidats)
 
 def agent_filtre(candidats):
     retenus = []
-    for ticker in candidats[:MAX_DOSSIERS]:
-        time.sleep(1.5) 
+    for i, ticker in enumerate(candidats[:MAX_DOSSIERS]):
+        time.sleep(0.8) 
+        if i > 0 and i % 25 == 0:
+            log.info(f"  ... {i} actions analysées ...")
+
         ana = voyants(ticker)
         if not ana or not ana["tous_verts"]: continue
         try:
@@ -256,8 +266,7 @@ def agent_filtre(candidats):
             if cot["prix"] > PRIX_MAX: continue
         except: continue
         ana.update(cot)
-        ana["nom"] = ticker.split('.')[0]
-        ana["pea"] = est_pea(ticker)
+        ana["nom"] = ticker.split('.')[0] # Nom provisoire
         retenus.append(ana)
         log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
     log.info("Agent 3 : %d titres passent le filtre technique", len(retenus))
@@ -285,20 +294,21 @@ def agent_analyse_fondamentale(titre):
 def agent_mail(resultats):
     if not resultats: return False
     best = sorted(resultats, key=lambda r: r["score_fin"], reverse=True)[:MAX_RESULTATS]
+    
     lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite détectée aujourd'hui :\n"]
     for r in best:
+        # On va chercher le vrai nom et l'ISIN au moment de l'envoi du mail
+        nom_complet, isin, pea = infos_entreprise(r['ticker'])
+        
         prix_achat = r["prix"]
         prix_vente_net = (prix_achat * 1.05) * 1.01 
+        
         lignes += [
-            f"=== {r['nom']} ({r['ticker']}) ===",
-            f"Éligible PEA : {r['pea']}",
-            f"Prix d'entrée : {prix_achat} | Objectif de sortie : {round(prix_vente_net, 2)}",
-            f"RSI(14) : {r['rsi']} | Score financier : {r['score_fin']}/100",
-            f"",
-            f"💡 L'analyse financière :",
-            f"{r['raison_fin']}",
-            f"",
-            f"📊 Historique : +5% atteint dans {r['taux_hist']}% des cas (délai: {r['duree_hist']} séances)."
+            f"🏢 Entreprise : {nom_complet} ({r['ticker']})",
+            f"🆔 ISIN : {isin} (Éligible PEA : {pea})",
+            f"💰 Achat : {prix_achat} € | Vente (+5% net) : {round(prix_vente_net, 2)} €",
+            f"⏳ Délai estimé : environ {r['duree_hist']} séances de bourse",
+            f"💡 Analyse : {r['raison_fin']}"
         ]
     try:
         envoyer_mail("PÉPITE Bourse — Opportunité", "\n".join(lignes))
@@ -328,7 +338,6 @@ def main():
     if a.diagnostic:
         log.info(f"DIAGNOSTIC -> Gmail User: {'OK' if GMAIL_USER else 'MANQUANT'}")
         log.info(f"DIAGNOSTIC -> Gmail Pwd: {'OK' if GMAIL_APP_PASSWORD else 'MANQUANT'}")
-        log.info(f"DIAGNOSTIC -> GitHub Token: {'OK' if GITHUB_TOKEN else 'MANQUANT'}")
         return
 
     if a.test or a.une_fois:
