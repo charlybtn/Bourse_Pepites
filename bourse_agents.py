@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe uniquement).
-Version : 400 entreprises analysées (8 pages de 50).
+Version : 500 entreprises analysées (10 pages de 50).
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -54,7 +54,7 @@ MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
 TAUX_REUSSITE_MIN = 0.50  
-MAX_DOSSIERS = 400        # <-- Modifié : On analyse jusqu'à 400 actions
+MAX_DOSSIERS = 500        # <-- Modifié : On analyse jusqu'à 500 actions
 DELAI_MEMOIRE_HEURES = 24 
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
@@ -244,11 +244,11 @@ def agent_actualites():
         EquityQuery('gt', ['avgdailyvol3m', 100000])
     ])
     
-    # 8 PAGES DE 50 = 400 ENTREPRISES
-    for page in range(8):
+    # 10 PAGES DE 50 = 500 ENTREPRISES
+    for page in range(10):
         offset = page * 50
         try:
-            log.info(f"Agent 1 : Recherche des pépites européennes (page {page + 1}/8)...")
+            log.info(f"Agent 1 : Recherche des pépites européennes (page {page + 1}/10)...")
             res = yf.screen(q, size=50, offset=offset, sortField='intradaymarketcap', sortAsc=False)
             for quote in res.get("quotes", []):
                 sym = quote.get("symbol", "")
@@ -257,7 +257,7 @@ def agent_actualites():
         except Exception as e:
             log.error(f"Échec du screener (page {page + 1}, offset {offset}) : {e}")
         
-        if page < 7:
+        if page < 9:
             time.sleep(4)
     
     log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées en Europe.")
