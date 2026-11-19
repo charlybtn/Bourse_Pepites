@@ -47,14 +47,14 @@ GITHUB_HEADERS = {
 }
 
 PRIX_MAX = 80.0
-SCORE_MIN = 65            # <-- ON GARDE LE NIVEAU D'EXIGENCE ÉLEVÉ
+SCORE_MIN = 65            
 MAX_RESULTATS = 1         
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
 TAUX_REUSSITE_MIN = 0.50  
-MAX_DOSSIERS = 300        # <-- ON PASSE À 300 ENTREPRISES
+MAX_DOSSIERS = 300        
 DELAI_MEMOIRE_HEURES = 24 
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
@@ -233,7 +233,7 @@ def calculer_score_local(ticker):
 def agent_actualites():
     candidats = set()
     
-    # LES NOUVEAUX FILTRES ANTI-SOMMET
+    # FILTRES YAHOO (SANS profitmargins qui fait planter l'API)
     q = EquityQuery('and', [
         EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS']),
         EquityQuery('lt', ['intradayprice', PRIX_MAX]),
@@ -241,14 +241,13 @@ def agent_actualites():
         EquityQuery('lt', ['intradaymarketcap', 3000000000]),
         EquityQuery('gt', ['intradaymarketcap', 50000000]),
         EquityQuery('gt', ['avgdailyvol3m', 100000]),
-        EquityQuery('gt', ['profitmargins', 0]),
         EquityQuery('gt', ['epsgrowth.lasttwelvemonths', 10]),
         EquityQuery('gt', ['totalrevenues1yrgrowth.lasttwelvemonths', 10]),
         
-        # FILTRES ANTI-SOMMET (nouvelles lignes)
-        EquityQuery('lt', ['fiftytwowkpercentchange', 50]),           # Max +50% sur 1 an
-        EquityQuery('lt', ['percentchange', 5]),                      # Max +5% aujourd'hui
-        EquityQuery('lt', ['lastclose52weekhigh.lasttwelvemonths', 0.90]) # Au moins 10% sous le plus haut
+        # FILTRES ANTI-SOMMET
+        EquityQuery('lt', ['fiftytwowkpercentchange', 50]),           
+        EquityQuery('lt', ['percentchange', 5]),                      
+        EquityQuery('lt', ['lastclose52weekhigh.lasttwelvemonths', 0.90]) 
     ])
     
     # 6 PAGES DE 50 = 300 ENTREPRISES
@@ -264,7 +263,7 @@ def agent_actualites():
             log.error(f"Échec du screener (page {page + 1}, offset {offset}) : {e}")
         
         if page < 5:
-            time.sleep(4) # Pause entre les pages
+            time.sleep(4)
     
     log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées (anti-sommet).")
     
