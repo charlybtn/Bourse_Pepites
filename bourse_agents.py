@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Objectif : 1 pépite par semaine, avec mémoire persistante sur GitHub.
+Analyse locale (Piotroski & Altman) + Mémoire persistante sur GitHub.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -16,13 +16,11 @@ from yfinance import EquityQuery
 warnings.filterwarnings("ignore")
 
 DOSSIER = Path(__file__).resolve().parent
-LOG = DOSSIER / "bourse.log"
-MEMOIRE = DOSSIER / "memoire_alertes.json"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG, encoding="utf-8"), logging.StreamHandler(sys.stdout)],
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("bourse")
 
@@ -38,8 +36,8 @@ def charger_env():
 charger_env()
 
 DEST_EMAIL = os.getenv("DEST_EMAIL") or os.getenv("GMAIL_USER") or "charlybotton85600@gmail.com"
-GMAIL_USER = os.getenv("GMAIL_USER") or DEST_EMAIL
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+GMAIL_USER = os.getenv("GMAIL_USER")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 # Variables pour la mémoire GitHub
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -74,7 +72,9 @@ PARIS = ZoneInfo("Europe/Paris")
 
 # ----------------------------------------------------------------- OUTILS
 def envoyer_mail(sujet, corps):
-    if not GMAIL_APP_PASSWORD: raise RuntimeError("Mot de passe Gmail manquant")
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD: 
+        raise RuntimeError(f"Identifiants manquants (User: {bool(GMAIL_USER)}, Pwd: {bool(GMAIL_APP_PASSWORD)})")
+    
     m = EmailMessage()
     m["Subject"], m["From"], m["To"] = sujet, GMAIL_USER, DEST_EMAIL
     m.set_content(corps)
@@ -85,53 +85,41 @@ def envoyer_mail(sujet, corps):
 
 # ----------------------------------------------------------------- MÉMOIRE GITHUB
 def lire_memoire_github():
-    """Lit le fichier de mémoire depuis GitHub (s'il existe)."""
-    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
-        return {}
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY: return {}
     url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/memoire_alertes.json"
     r = requests.get(url, headers=GITHUB_HEADERS)
-    if r.status_code == 404:
-        return {}
+    if r.status_code == 404: return {}
     if r.status_code == 200:
         contenu = base64.b64decode(r.json()["content"]).decode("utf-8")
         return json.loads(contenu)
     return {}
 
 def mettre_a_jour_memoire_github(ticker):
-    """Met à jour la mémoire sur GitHub. Crée le fichier ou le met à jour."""
-    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
-        return
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY: return
     url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/memoire_alertes.json"
     memoire = lire_memoire_github()
     memoire[ticker] = datetime.now().isoformat()
     
     contenu_encode = base64.b64encode(json.dumps(memoire, indent=1).encode("utf-8")).decode("utf-8")
     
-    # On vérifie si le fichier existe déjà (pour avoir son SHA)
     r = requests.get(url, headers=GITHUB_HEADERS)
     sha = r.json().get("sha") if r.status_code == 200 else None
     
-    payload = {
-        "message": f"Mise à jour mémoire: {ticker}",
-        "content": contenu_encode,
-        "branch": "main"
-    }
-    if sha:
-        payload["sha"] = sha
+    payload = {"message": f"Mémoire: {ticker}", "content": contenu_encode, "branch": "main"}
+    if sha: payload["sha"] = sha
         
     r = requests.put(url, headers=GITHUB_HEADERS, json=payload)
     if r.status_code in (200, 201):
         log.info(f"Mémoire GitHub mise à jour pour {ticker}.")
     else:
-        log.error(f"Erreur mise à jour mémoire GitHub : {r.status_code}")
+        log.error(f"Erreur mise à jour mémoire GitHub : {r.status_code} - {r.text}")
 
-# ----------------------------------------------------------------- FRAIS
+# ----------------------------------------------------------------- FRAIS & TECHNIQUE
 def frais(montant):
     if FORMULE == "starter": return montant * 0.0035
     if FORMULE == "trader": return 9.50 if montant <= 10000 else montant * 0.0010
     return 4.90 if montant <= 3000 else montant * 0.0015
 
-# ----------------------------------------------------------------- YAHOO & TECHNIQUE
 def cotation(ticker):
     try:
         fi = yf.Ticker(ticker).fast_info
@@ -191,13 +179,10 @@ def historique_cible(h, hausse_pct):
     if not total or not durees: return 0.0, 0
     return ok / total, sorted(durees)[len(durees)//2]
 
-# ----------------------------------------------------------------- SANTÉ FINANCIÈRE LOCALE
 def calculer_score_local(ticker):
     try:
         t = yf.Ticker(ticker)
-        bilan = t.balance_sheet
-        resultat = t.income_stmt
-        tresorerie = t.cashflow
+        bilan, resultat, tresorerie = t.balance_sheet, t.income_stmt, t.cashflow
         
         if bilan.empty or resultat.empty or tresorerie.empty or len(bilan.columns) < 2:
             return 50, "Données financières insuffisantes (neutre)"
@@ -227,18 +212,15 @@ def calculer_score_local(ticker):
         if rot > rot_prec: score_f += 1
 
         fonds_roulement = bilan.loc['Current Assets'].iloc[0] - bilan.loc['Current Liabilities'].iloc[0]
-        z_score = (
-            6.56 * (fonds_roulement / bilan.loc['Total Assets'].iloc[0]) +
-            3.26 * (bilan.loc['Retained Earnings'].iloc[0] / bilan.loc['Total Assets'].iloc[0]) +
-            6.72 * (resultat.loc['EBIT'].iloc[0] / bilan.loc['Total Assets'].iloc[0]) +
-            1.05 * (bilan.loc['Total Equity Gross Minority Interest'].iloc[0] / bilan.loc['Total Liabilities Net Minority Interest'].iloc[0])
-        )
+        z_score = (6.56 * (fonds_roulement / bilan.loc['Total Assets'].iloc[0]) +
+                   3.26 * (bilan.loc['Retained Earnings'].iloc[0] / bilan.loc['Total Assets'].iloc[0]) +
+                   6.72 * (resultat.loc['EBIT'].iloc[0] / bilan.loc['Total Assets'].iloc[0]) +
+                   1.05 * (bilan.loc['Total Equity Gross Minority Interest'].iloc[0] / bilan.loc['Total Liabilities Net Minority Interest'].iloc[0]))
 
         if score_f >= 7 and z_score > 2.99: return 90, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Solide)"
         elif score_f >= 5 and z_score > 1.81: return 65, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Moyen)"
         else: return 30, f"F-Score: {score_f}/9, Z-Score: {z_score:.2f} (Risqué)"
-    except Exception as e:
-        return 50, "Erreur de calcul (neutre)"
+    except: return 50, "Erreur de calcul (neutre)"
 
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
@@ -251,47 +233,38 @@ def agent_actualites():
     ])
     
     try:
-        log.info("Agent 1 : Recherche des pépites sur les marchés (Europe + USA)...")
+        log.info("Agent 1 : Recherche des pépites...")
         res = yf.screen(q, size=50)
         for quote in res.get("quotes", []):
             sym = quote.get("symbol", "")
-            if quote.get("quoteType") == "EQUITY": 
-                candidats.add(sym)
+            if quote.get("quoteType") == "EQUITY": candidats.add(sym)
         log.info(f"Agent 1 : {len(candidats)} pépites trouvées.")
     except Exception as e:
-        log.error(f"Échec du screener : {e}. Bascule sur la liste de secours.")
+        log.error(f"Échec du screener : {e}")
     
-    if not candidats:
-        candidats.update(TICKERS_SECOURS)
-        
+    if not candidats: candidats.update(TICKERS_SECOURS)
     return list(candidats)
 
 def agent_filtre(candidats):
     retenus = []
     for ticker in candidats[:MAX_DOSSIERS]:
-        time.sleep(1.5) # Pause anti-blocage
-        
+        time.sleep(1.5) 
         ana = voyants(ticker)
         if not ana or not ana["tous_verts"]: continue
-        
         try:
             cot = cotation(ticker)
             if cot["prix"] > PRIX_MAX: continue
         except: continue
-        
         ana.update(cot)
         ana["nom"] = ticker.split('.')[0]
         ana["pea"] = est_pea(ticker)
         retenus.append(ana)
         log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
-        
     log.info("Agent 3 : %d titres passent le filtre technique", len(retenus))
     return retenus
 
 def agent_analyse_fondamentale(titre):
     ticker = titre["ticker"]
-    
-    # 1. LECTURE DE LA MÉMOIRE GITHUB
     memoire = lire_memoire_github()
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
@@ -299,57 +272,37 @@ def agent_analyse_fondamentale(titre):
             log.info(f"  -> {ticker} ignoré : déjà alerté récemment.")
             return None
 
-    # 2. Historique
     taux, duree = historique_cible(titre["_h"], GAIN_NET_PCT)
     log.info(f"  -> {ticker} taux de réussite historique : {taux*100:.1f}%")
-    if taux < TAUX_REUSSITE_MIN: 
-        log.info(f"  -> {ticker} rejeté : taux historique trop faible.")
-        return None
+    if taux < TAUX_REUSSITE_MIN: return None
 
-    # 3. Score Financier
     score, raison = calculer_score_local(ticker)
     log.info(f"  -> {ticker} score financier : {score}/100 ({raison})")
-    if score < SCORE_MIN: 
-        log.info(f"  -> {ticker} rejeté : score financier < {SCORE_MIN}.")
-        return None
+    if score < SCORE_MIN: return None
 
     return {**titre, "score_fin": score, "raison_fin": raison, "taux_hist": round(taux*100, 1), "duree_hist": duree}
 
 def agent_mail(resultats):
     if not resultats: return False
     best = sorted(resultats, key=lambda r: r["score_fin"], reverse=True)[:MAX_RESULTATS]
-    
     lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite détectée aujourd'hui :\n"]
     for r in best:
         prix_achat = r["prix"]
-        prix_vente_brut = prix_achat * 1.05
-        prix_vente_net = prix_vente_brut * 1.01 
-        
+        prix_vente_net = (prix_achat * 1.05) * 1.01 
         lignes += [
             f"=== {r['nom']} ({r['ticker']}) ===",
             f"Éligible PEA : {r['pea']}",
-            f"Prix d'entrée (Achat) : {prix_achat}",
-            f"Objectif de sortie (Vente) : {round(prix_vente_net, 2)} (pour viser +5% net après frais)",
-            f"RSI(14)    : {r['rsi']}",
-            f"Score financier : {r['score_fin']}/100",
+            f"Prix d'entrée : {prix_achat} | Objectif de sortie : {round(prix_vente_net, 2)}",
+            f"RSI(14) : {r['rsi']} | Score financier : {r['score_fin']}/100",
             f"",
-            f"💡 L'analyse financière (Piotroski / Altman) :",
+            f"💡 L'analyse financière :",
             f"{r['raison_fin']}",
             f"",
-            f"📊 Historique de l'action :",
-            f"Cette action a atteint cet objectif de +5% dans {r['taux_hist']}% des cas sur l'année passée.",
-            f"Délai estimé pour atteindre l'objectif : environ {r['duree_hist']} séances de bourse.",
-            f"",
-            f"💰 PLAN D'ORDRE (à toi d'adapter selon ton budget) :",
-            f"Tu peux acheter un multiple de 10 actions.",
-            f"Exemple pour 10 actions : {round(10 * prix_achat, 2)} (hors frais).",
-            ""
+            f"📊 Historique : +5% atteint dans {r['taux_hist']}% des cas (délai: {r['duree_hist']} séances)."
         ]
     try:
         envoyer_mail("PÉPITE Bourse — Opportunité", "\n".join(lignes))
-        # Mise à jour de la mémoire sur GitHub après l'envoi
-        for r in best:
-            mettre_a_jour_memoire_github(r["ticker"])
+        for r in best: mettre_a_jour_memoire_github(r["ticker"])
         return True
     except Exception as e:
         log.error(f"Erreur mail: {e}")
@@ -358,20 +311,13 @@ def agent_mail(resultats):
 def un_passage():
     cands = agent_actualites()
     retenus = agent_filtre(cands)
-    
     resultats = []
     for t in retenus:
         r = agent_analyse_fondamentale(t)
         if r: resultats.append(r)
-        
-    if resultats: 
-        agent_mail(resultats)
-    else:
-        log.info("Aucune action n'a passé tous les filtres (ou l'envoi de mail a échoué).")
-        
+    if resultats: agent_mail(resultats)
     log.info("Passage terminé — %d propositions", len(resultats))
 
-# ----------------------------------------------------------------- MAIN
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--test", action="store_true")
@@ -380,14 +326,15 @@ def main():
     a = p.parse_args()
 
     if a.diagnostic:
-        print(f"Gmail: {'OK' if GMAIL_APP_PASSWORD else 'MANQUANT'}")
+        log.info(f"DIAGNOSTIC -> Gmail User: {'OK' if GMAIL_USER else 'MANQUANT'}")
+        log.info(f"DIAGNOSTIC -> Gmail Pwd: {'OK' if GMAIL_APP_PASSWORD else 'MANQUANT'}")
+        log.info(f"DIAGNOSTIC -> GitHub Token: {'OK' if GITHUB_TOKEN else 'MANQUANT'}")
         return
 
     if a.test or a.une_fois:
         un_passage()
         return
 
-    # Boucle principale
     while True:
         n = datetime.now(PARIS)
         if n.weekday() < 5 and (9, 0) <= (n.hour, n.minute) <= (17, 30):
