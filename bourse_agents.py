@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe + USA).
-Version : Screener Yahoo "aggressive_small_caps" + Mail ultra-concis.
+Version 300 dossiers : Filtres stricts + Anti-sommet (exclut les actions déjà montées).
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -47,14 +47,14 @@ GITHUB_HEADERS = {
 }
 
 PRIX_MAX = 80.0
-SCORE_MIN = 65            
+SCORE_MIN = 65            # <-- ON GARDE LE NIVEAU D'EXIGENCE ÉLEVÉ
 MAX_RESULTATS = 1         
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 GAIN_NET_PCT = 5.0
 HORIZON_MAX_SEANCES = 40
 TAUX_REUSSITE_MIN = 0.50  
-MAX_DOSSIERS = 200        
+MAX_DOSSIERS = 300        # <-- ON PASSE À 300 ENTREPRISES
 DELAI_MEMOIRE_HEURES = 24 
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
@@ -128,13 +128,11 @@ def cotation(ticker):
     return {"ticker": ticker, "prix": round(prix, 3), "var_pct": round((prix / prec - 1) * 100, 2)}
 
 def infos_entreprise(ticker):
-    """Récupère le nom complet et l'ISIN pour le mail."""
     try:
         t = yf.Ticker(ticker)
         nom = t.info.get("longName") or t.info.get("shortName") or ticker
         isin = t.isin if hasattr(t, 'isin') else "Inconnu"
         
-        # Vérification PEA
         pea = "Inconnu"
         if isin and len(isin) >= 2:
             pea = "Oui" if isin[:2] in PAYS_PEA else "Non"
@@ -157,8 +155,8 @@ def flags_serie(h):
     repli = c / c.rolling(20).max() - 1
     f = {
         "tendance": (c > c.rolling(200).mean()).fillna(False),
-        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False),
-        "rsi": rsi.between(30, 60).fillna(False),
+        "repli": ((var5 <= 0.01) & (repli >= -0.15)).fillna(False),  # STRICT : -15%
+        "rsi": rsi.between(30, 60).fillna(False),                    # STRICT : 60
         "macd": ((hist > hist.shift(1)) & (hist.shift(1) > hist.shift(2))).fillna(False),
         "volume": (vol.rolling(20).mean() >= 100000).fillna(False),
     }
@@ -194,12 +192,12 @@ def calculer_score_local(ticker):
         bilan, resultat, tresorerie = t.balance_sheet, t.income_stmt, t.cashflow
         
         if bilan.empty or resultat.empty or tresorerie.empty or len(bilan.columns) < 2:
-            return 50, "Données financières insuffisantes."
+            return 50, "Données financières insuffisantes (neutre)"
             
         lignes_bilan = ['Total Assets', 'Current Assets', 'Current Liabilities', 'Ordinary Shares Number', 'Long Term Debt']
-        if any(l not in bilan.index for l in lignes_bilan): return 50, "Bilan incomplet."
+        if any(l not in bilan.index for l in lignes_bilan): return 50, "Bilan incomplet (neutre)"
         lignes_res = ['Net Income', 'Gross Profit', 'Total Revenue', 'EBIT']
-        if any(l not in resultat.index for l in lignes_res): return 50, "Résultats incomplets."
+        if any(l not in resultat.index for l in lignes_res): return 50, "Résultats incomplets (neutre)"
 
         score_f = 0
         if resultat.loc['Net Income'].iloc[0] / bilan.loc['Total Assets'].iloc[0] > 0: score_f += 1
@@ -234,21 +232,44 @@ def calculer_score_local(ticker):
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
-    log.info("Agent 1 : Recherche via le screener 'aggressive_small_caps' de Yahoo...")
     
-    for page in range(4):
+    # LES NOUVEAUX FILTRES ANTI-SOMMET
+    q = EquityQuery('and', [
+        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'NYQ', 'NMS']),
+        EquityQuery('lt', ['intradayprice', PRIX_MAX]),
+        EquityQuery('gt', ['intradayprice', 1.0]),
+        EquityQuery('lt', ['intradaymarketcap', 3000000000]),
+        EquityQuery('gt', ['intradaymarketcap', 50000000]),
+        EquityQuery('gt', ['avgdailyvol3m', 100000]),
+        EquityQuery('gt', ['profitmargins', 0]),
+        EquityQuery('gt', ['epsgrowth.lasttwelvemonths', 10]),
+        EquityQuery('gt', ['totalrevenues1yrgrowth.lasttwelvemonths', 10]),
+        
+        # FILTRES ANTI-SOMMET (nouvelles lignes)
+        EquityQuery('lt', ['fiftytwowkpercentchange', 50]),           # Max +50% sur 1 an
+        EquityQuery('lt', ['percentchange', 5]),                      # Max +5% aujourd'hui
+        EquityQuery('lt', ['lastclose52weekhigh.lasttwelvemonths', 0.90]) # Au moins 10% sous le plus haut
+    ])
+    
+    # 6 PAGES DE 50 = 300 ENTREPRISES
+    for page in range(6):
         offset = page * 50
         try:
-            res = yf.screen("aggressive_small_caps", size=50, offset=offset)
+            log.info(f"Agent 1 : Recherche des pépites (page {page + 1}/6)...")
+            res = yf.screen(q, size=50, offset=offset, sortField='intradaymarketcap', sortAsc=False)
             for quote in res.get("quotes", []):
                 sym = quote.get("symbol", "")
                 if quote.get("quoteType") == "EQUITY": candidats.add(sym)
         except Exception as e:
-            log.error(f"Échec du screener (page {page + 1}) : {e}")
-        if page < 3: time.sleep(5)
+            log.error(f"Échec du screener (page {page + 1}, offset {offset}) : {e}")
+        
+        if page < 5:
+            time.sleep(4) # Pause entre les pages
     
-    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées.")
+    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées (anti-sommet).")
+    
     if not candidats: 
+        log.warning("Aucune pépite trouvée avec les filtres stricts, utilisation de la liste de secours.")
         candidats.update(TICKERS_SECOURS)
     return list(candidats)
 
@@ -257,7 +278,7 @@ def agent_filtre(candidats):
     for i, ticker in enumerate(candidats[:MAX_DOSSIERS]):
         time.sleep(0.8) 
         if i > 0 and i % 25 == 0:
-            log.info(f"  ... {i} actions analysées ...")
+            log.info(f"  ... {i} actions analysées sur {min(len(candidats), MAX_DOSSIERS)} ...")
 
         ana = voyants(ticker)
         if not ana or not ana["tous_verts"]: continue
@@ -266,7 +287,7 @@ def agent_filtre(candidats):
             if cot["prix"] > PRIX_MAX: continue
         except: continue
         ana.update(cot)
-        ana["nom"] = ticker.split('.')[0] # Nom provisoire
+        ana["nom"] = ticker.split('.')[0]
         retenus.append(ana)
         log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
     log.info("Agent 3 : %d titres passent le filtre technique", len(retenus))
@@ -297,12 +318,9 @@ def agent_mail(resultats):
     
     lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite détectée aujourd'hui :\n"]
     for r in best:
-        # On va chercher le vrai nom et l'ISIN au moment de l'envoi du mail
         nom_complet, isin, pea = infos_entreprise(r['ticker'])
-        
         prix_achat = r["prix"]
         prix_vente_net = (prix_achat * 1.05) * 1.01 
-        
         lignes += [
             f"🏢 Entreprise : {nom_complet} ({r['ticker']})",
             f"🆔 ISIN : {isin} (Éligible PEA : {pea})",
