@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Système d'agents IA pour la bourse - Chasseur de Pépites (Europe uniquement).
-Version : 500 entreprises analysées (10 pages de 50).
+Système d'agents IA pour la bourse - Chasseur de Pépites (Europe, EUR).
+Analyse des faits via l'API Marketaux (sentiment_score).
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -38,6 +38,7 @@ charger_env()
 DEST_EMAIL = os.getenv("DEST_EMAIL") or os.getenv("GMAIL_USER") or "charlybotton85600@gmail.com"
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
@@ -51,10 +52,9 @@ SCORE_MIN = 65
 MAX_RESULTATS = 1         
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
-GAIN_NET_PCT = 5.0
-HORIZON_MAX_SEANCES = 40
-TAUX_REUSSITE_MIN = 0.50  
-MAX_DOSSIERS = 500        # <-- Modifié : On analyse jusqu'à 500 actions
+HORIZON_MAX_SEANCES = 30  
+TAUX_REUSSITE_MIN = 0.60  
+MAX_DOSSIERS = 500        
 DELAI_MEMOIRE_HEURES = 24 
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
@@ -123,6 +123,8 @@ def frais(montant):
 def cotation(ticker):
     try:
         fi = yf.Ticker(ticker).fast_info
+        if fi.currency != "EUR":
+            raise ValueError(f"Devise non EUR ({fi.currency})")
         prix, prec = float(fi.last_price), float(fi.previous_close)
         if not prix or not prec: raise ValueError()
     except: raise RuntimeError(f"Cotation indisponible: {ticker}")
@@ -143,6 +145,23 @@ def infos_entreprise(ticker):
         return nom, isin, pea
     except:
         return ticker, "Inconnu", "Inconnu"
+
+def prix_minimum_pour_10_net(prix_achat):
+    n = MIN_ACTIONS
+    buy_value = n * prix_achat
+    buy_fee = frais(buy_value)
+    total_cost = buy_value + buy_fee
+    
+    net_target = total_cost * 0.10
+    target_before_tax = net_target / (1 - 0.172)
+    target_sell_value = buy_value + buy_fee + target_before_tax
+    
+    p_v = target_sell_value / n
+    for _ in range(6):
+        sell_fee = frais(n * p_v)
+        p_v = (target_sell_value + sell_fee) / n
+        
+    return math.ceil(p_v * 100) / 100
 
 def flags_serie(h):
     c, vol = h["Close"], h["Volume"]
@@ -169,10 +188,18 @@ def voyants(ticker):
     if len(h) < 210: return None
     f, rsi, var5, repli = flags_serie(h)
     flags = [bool(s.iloc[-1]) for s in f.values()]
+    
+    h['H-L'] = h['High'] - h['Low']
+    h['H-PC'] = (h['High'] - h['Close'].shift(1)).abs()
+    h['L-PC'] = (h['Low'] - h['Close'].shift(1)).abs()
+    h['TR'] = h[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    atr_14 = h['TR'].rolling(14).mean().iloc[-1]
+    volatilite_pct = (atr_14 / h['Close'].iloc[-1]) * 100
+    
     return {
         "flags": flags, "voyants_ok": sum(flags), "tous_verts": all(flags),
         "rsi": round(float(rsi.iloc[-1]), 1), "var5_pct": round(float(var5.iloc[-1])*100, 2),
-        "repli_pct": round(float(repli.iloc[-1])*100, 2), "_h": h
+        "repli_pct": round(float(repli.iloc[-1])*100, 2), "volatilite": round(volatilite_pct, 2), "_h": h
     }
 
 def historique_cible(h, hausse_pct):
@@ -230,40 +257,84 @@ def calculer_score_local(ticker):
         else: return 30, f"Risqué (F-Score {score_f}/9)."
     except: return 50, "Analyse indisponible."
 
+def analyser_actualites_marketaux(ticker):
+    """Récupère le sentiment des actualités via l'API Marketaux."""
+    if not MARKETAUX_API_KEY:
+        return None, "Clé Marketaux manquante."
+    
+    try:
+        url = f"https://api.marketaux.com/v1/news/all?symbols={ticker}&filter_entities=true&language=fr,en,de,es,it&api_token={MARKETAUX_API_KEY}"
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        
+        articles = data.get("data", [])
+        if not articles:
+            return None, "Aucun article trouvé."
+            
+        # On cherche le sentiment moyen des entités liées à cette action
+        sentiments = []
+        for art in articles:
+            for entity in art.get("entities", []):
+                if entity.get("symbol") == ticker.replace(".PA", "").replace(".AS", "") or entity.get("symbol") == ticker:
+                    s = entity.get("sentiment_score")
+                    if s is not None:
+                        sentiments.append(s)
+        
+        if not sentiments:
+            return None, "Pas de score de sentiment pour cette action."
+            
+        sentiment_moyen = sum(sentiments) / len(sentiments)
+        
+        # On garde l'article le plus récent avec un sentiment positif
+        meilleur_article = None
+        for art in articles:
+            if art.get("entities") and art["entities"][0].get("sentiment_score", 0) > 0.1:
+                meilleur_article = art.get("title")
+                break
+                
+        if sentiment_moyen > 0.1: # Seuil de positivité
+            return meilleur_article or "Sentiment positif détecté", f"Sentiment moyen : {sentiment_moyen:.2f}"
+        else:
+            return None, f"Sentiment trop faible ou négatif ({sentiment_moyen:.2f})"
+            
+    except Exception as e:
+        return None, f"Erreur API Marketaux : {e}"
+
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
+    places = [
+        ('PAR', 'France'), ('FRA', 'Allemagne'), ('GER', 'Allemagne'),
+        ('AMS', 'Pays-Bas'), ('BRU', 'Belgique'), ('MIL', 'Italie'), 
+        ('MCE', 'Espagne'), ('LIS', 'Portugal')
+    ]
     
-    # SCREENER 100% EUROPÉEN
-    q = EquityQuery('and', [
-        EquityQuery('is-in', ['exchange', 'PAR', 'AMS', 'BRU', 'FRA', 'GER', 'MIL', 'MCE', 'LIS']),
-        EquityQuery('lt', ['intradayprice', PRIX_MAX]),
-        EquityQuery('gt', ['intradayprice', 1.0]),
-        EquityQuery('lt', ['intradaymarketcap', 3000000000]),
-        EquityQuery('gt', ['intradaymarketcap', 50000000]),
-        EquityQuery('gt', ['avgdailyvol3m', 100000])
-    ])
-    
-    # 10 PAGES DE 50 = 500 ENTREPRISES
-    for page in range(10):
-        offset = page * 50
-        try:
-            log.info(f"Agent 1 : Recherche des pépites européennes (page {page + 1}/10)...")
-            res = yf.screen(q, size=50, offset=offset, sortField='intradaymarketcap', sortAsc=False)
-            for quote in res.get("quotes", []):
-                sym = quote.get("symbol", "")
-                if quote.get("quoteType") == "EQUITY" and sym.endswith(SUFFIXES): 
-                    candidats.add(sym)
-        except Exception as e:
-            log.error(f"Échec du screener (page {page + 1}, offset {offset}) : {e}")
+    for exchange, pays in places:
+        q = EquityQuery('and', [
+            EquityQuery('eq', ['exchange', exchange]),
+            EquityQuery('lt', ['intradayprice', PRIX_MAX]),
+            EquityQuery('gt', ['intradayprice', 1.0]),
+            EquityQuery('lt', ['intradaymarketcap', 3000000000]),
+            EquityQuery('gt', ['intradaymarketcap', 50000000]),
+            EquityQuery('gt', ['avgdailyvol3m', 100000])
+        ])
         
-        if page < 9:
-            time.sleep(4)
+        for page in range(2):
+            offset = page * 50
+            try:
+                log.info(f"Agent 1 : Recherche en {pays} (page {page + 1}/2)...")
+                res = yf.screen(q, size=50, offset=offset, sortField='intradaymarketcap', sortAsc=False)
+                for quote in res.get("quotes", []):
+                    sym = quote.get("symbol", "")
+                    if quote.get("quoteType") == "EQUITY" and sym.endswith(SUFFIXES): 
+                        candidats.add(sym)
+            except Exception as e:
+                log.error(f"Échec du screener ({pays}, page {page + 1}) : {e}")
+            time.sleep(3)
     
     log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées en Europe.")
-    
     if not candidats: 
-        log.warning("Aucune pépite trouvée, utilisation de la liste de secours.")
         candidats.update(TICKERS_SECOURS)
     return list(candidats)
 
@@ -276,6 +347,10 @@ def agent_filtre(candidats):
 
         ana = voyants(ticker)
         if not ana or not ana["tous_verts"]: continue
+        
+        if ana["volatilite"] < 1.5:
+            continue
+
         try:
             cot = cotation(ticker)
             if cot["prix"] > PRIX_MAX: continue
@@ -284,6 +359,7 @@ def agent_filtre(candidats):
         ana["nom"] = ticker.split('.')[0]
         retenus.append(ana)
         log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
+        
     log.info("Agent 3 : %d titres passent le filtre technique", len(retenus))
     return retenus
 
@@ -293,35 +369,50 @@ def agent_analyse_fondamentale(titre):
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
         if datetime.now() - derniere_alerte < timedelta(hours=DELAI_MEMOIRE_HEURES):
-            log.info(f"  -> {ticker} ignoré : déjà alerté récemment.")
             return None
 
-    taux, duree = historique_cible(titre["_h"], GAIN_NET_PCT)
-    log.info(f"  -> {ticker} taux de réussite historique : {taux*100:.1f}%")
+    # 1. Analyse des faits via Marketaux
+    fait, msg_sentiment = analyser_actualites_marketaux(ticker)
+    log.info(f"  -> {ticker} Marketaux : {msg_sentiment}")
+    if not fait:
+        return None 
+
+    # 2. Calcul du prix cible (pour +10% net)
+    prix_cible = prix_minimum_pour_10_net(titre["prix"])
+    hausse_requise_pct = ((prix_cible - titre["prix"]) / titre["prix"]) * 100
+    
+    # 3. Vérification historique
+    taux, duree = historique_cible(titre["_h"], hausse_requise_pct)
     if taux < TAUX_REUSSITE_MIN: return None
 
+    # 4. Score financier
     score, raison = calculer_score_local(ticker)
-    log.info(f"  -> {ticker} score financier : {score}/100 ({raison})")
     if score < SCORE_MIN: return None
 
-    return {**titre, "score_fin": score, "raison_fin": raison, "taux_hist": round(taux*100, 1), "duree_hist": duree}
+    return {
+        **titre, "score_fin": score, "raison_fin": raison, 
+        "taux_hist": round(taux*100, 1), "duree_hist": duree, 
+        "prix_cible": prix_cible, "fait": fait
+    }
 
 def agent_mail(resultats):
     if not resultats: return False
-    best = sorted(resultats, key=lambda r: r["score_fin"], reverse=True)[:MAX_RESULTATS]
+    
+    best = sorted(resultats, key=lambda r: (r["score_fin"], r["pea"] == "Oui"), reverse=True)[:MAX_RESULTATS]
     
     lignes = ["Bonjour Charly,\n", "Voici la meilleure pépite européenne détectée aujourd'hui :\n"]
     for r in best:
         nom_complet, isin, pea = infos_entreprise(r['ticker'])
         prix_achat = r["prix"]
-        prix_vente_net = (prix_achat * 1.05) * 1.01 
+        
         lignes += [
             f"🏢 Entreprise : {nom_complet} ({r['ticker']})",
             f"🆔 ISIN : {isin} (Éligible PEA : {pea})",
-            f"💰 Achat : {prix_achat} € | Vente (+5% net) : {round(prix_vente_net, 2)} €",
-            f"⏳ Délai estimé : environ {r['duree_hist']} séances de bourse",
-            f"💡 Analyse : {r['raison_fin']}"
+            f"💰 Achat : {prix_achat} € | Vente (+10% net) : {r['prix_cible']} €",
+            f"⏳ Délai estimé : environ {r['duree_hist']} séances (max 30)",
+            f"📰 Fait : {r['fait'][:80]}... | 💡 {r['raison_fin']}"
         ]
+        
     try:
         envoyer_mail("PÉPITE Bourse — Opportunité Européenne", "\n".join(lignes))
         for r in best: mettre_a_jour_memoire_github(r["ticker"])
@@ -350,6 +441,7 @@ def main():
     if a.diagnostic:
         log.info(f"DIAGNOSTIC -> Gmail User: {'OK' if GMAIL_USER else 'MANQUANT'}")
         log.info(f"DIAGNOSTIC -> Gmail Pwd: {'OK' if GMAIL_APP_PASSWORD else 'MANQUANT'}")
+        log.info(f"DIAGNOSTIC -> Marketaux Key: {'OK' if MARKETAUX_API_KEY else 'MANQUANT'}")
         return
 
     if a.test or a.une_fois:
