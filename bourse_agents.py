@@ -126,32 +126,6 @@ def frais(montant):
     if FORMULE == "trader": return 9.50 if montant <= 10000 else montant * 0.0010
     return 4.90 if montant <= 3000 else montant * 0.0015
 
-def cotation(ticker):
-    try:
-        fi = yf.Ticker(ticker).fast_info
-        if fi.currency != "EUR":
-            raise ValueError(f"Devise non EUR ({fi.currency})")
-        prix, prec = float(fi.last_price), float(fi.previous_close)
-        if not prix or not prec: raise ValueError()
-    except: raise RuntimeError(f"Cotation indisponible: {ticker}")
-    return {"ticker": ticker, "prix": round(prix, 3), "var_pct": round((prix / prec - 1) * 100, 2)}
-
-def infos_entreprise(ticker):
-    try:
-        t = yf.Ticker(ticker)
-        nom = t.info.get("longName") or t.info.get("shortName") or ticker
-        isin = t.isin if hasattr(t, 'isin') else "Inconnu"
-        
-        pea = "Inconnu"
-        if isin and len(isin) >= 2:
-            pea = "Oui" if isin[:2] in PAYS_PEA else "Non"
-        elif ticker.endswith((".PA", ".AS", ".BR", ".LS", ".DE", ".F", ".MI", ".MC")):
-            pea = "Oui"
-            
-        return nom, isin, pea
-    except:
-        return ticker, "Inconnu", "Inconnu"
-
 def prix_minimum_pour_10_net(prix_achat):
     n = MIN_ACTIONS
     buy_value = n * prix_achat
@@ -168,6 +142,22 @@ def prix_minimum_pour_10_net(prix_achat):
         p_v = (target_sell_value + sell_fee) / n
         
     return math.ceil(p_v * 100) / 100
+
+def infos_entreprise(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        nom = t.info.get("longName") or t.info.get("shortName") or ticker
+        isin = t.isin if hasattr(t, 'isin') else "Inconnu"
+        
+        pea = "Inconnu"
+        if isin and len(isin) >= 2:
+            pea = "Oui" if isin[:2] in PAYS_PEA else "Non"
+        elif ticker.endswith((".PA", ".AS", ".BR", ".LS", ".DE", ".F", ".MI", ".MC")):
+            pea = "Oui"
+            
+        return nom, isin, pea
+    except:
+        return ticker, "Inconnu", "Inconnu"
 
 def flags_serie(h):
     c, vol = h["Close"], h["Volume"]
@@ -368,6 +358,7 @@ def agent_filtre(candidats):
         if ana["volatilite"] < 1.5:
             continue
 
+        ana["ticker"] = ticker  # <-- LA CORRECTION EST ICI
         ana["prix"] = prix
         ana["var_pct"] = var_pct
         ana["nom"] = ticker.split('.')[0]
@@ -456,7 +447,6 @@ def main():
         log.info(f"DIAGNOSTIC -> Marketaux Key: {'OK' if MARKETAUX_API_KEY else 'MANQUANT'}")
         return
 
-    # LA CORRECTION EST ICI (plus de 'une_fonce')
     if a.test or a.une_fois:
         un_passage()
         return
