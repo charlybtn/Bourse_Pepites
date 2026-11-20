@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe, EUR).
-Recherche ultra-large (milliers d'entreprises) + Filtrage Python.
+Recherche ultra-large (milliers d'entreprises) + Filtrage Python + Marketaux.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -54,7 +54,7 @@ FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 HORIZON_MAX_SEANCES = 30  
 TAUX_REUSSITE_MIN = 0.60  
-MAX_DOSSIERS = 3000       # <-- AUGMENTÉ : On peut aller jusqu'à 3000
+MAX_DOSSIERS = 3000       
 DELAI_MEMOIRE_JOURS = 30  
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
@@ -308,7 +308,6 @@ def analyser_actualites_marketaux(ticker):
 def agent_actualites():
     candidats = set()
     
-    # On ratisse TOUTE l'Europe (y compris les places non-EUR pour le volume, le filtre EUR se fera après)
     places = [
         ('PAR', 'France'), ('FRA', 'Allemagne'), ('GER', 'Allemagne'),
         ('AMS', 'Pays-Bas'), ('BRU', 'Belgique'), ('MIL', 'Italie'), 
@@ -322,18 +321,16 @@ def agent_actualites():
             EquityQuery('eq', ['exchange', exchange]),
             EquityQuery('lt', ['intradayprice', PRIX_MAX]),
             EquityQuery('gt', ['intradayprice', 1.0]),
-            # ON A RETIRÉ LE FILTRE DE CAPITALISATION (Market Cap)
             EquityQuery('gt', ['avgdailyvol3m', 50000]) 
         ])
         
-        # ON AUGMENTE LE NOMBRE DE PAGES (ex: 10 pages de 100 = 1000 par pays)
         for page in range(10):
             offset = page * 100
             try:
                 log.info(f"Agent 1 : Recherche en {pays} (page {page + 1}/10)...")
                 res = yf.screen(q, size=100, offset=offset, sortField='intradaymarketcap', sortAsc=False)
                 quotes = res.get("quotes", [])
-                if not quotes: break # S'il n'y a plus de résultats, on arrête pour ce pays
+                if not quotes: break 
                 for quote in quotes:
                     sym = quote.get("symbol", "")
                     if quote.get("quoteType") == "EQUITY" and sym.endswith(SUFFIXES): 
@@ -350,13 +347,11 @@ def agent_actualites():
 def agent_filtre(candidats):
     retenus = []
     
-    # OPTIMISATION : On filtre le prix et la devise AVANT de télécharger l'historique
     for i, ticker in enumerate(candidats[:MAX_DOSSIERS]):
         time.sleep(0.3) 
         if i > 0 and i % 100 == 0:
             log.info(f"  ... {i} actions vérifiées sur {min(len(candidats), MAX_DOSSIERS)} ...")
 
-        # 1. Vérification rapide (Prix, Devise)
         try:
             fi = yf.Ticker(ticker).fast_info
             if fi.currency != "EUR" or fi.last_price > PRIX_MAX or fi.last_price < 1.0:
@@ -367,7 +362,6 @@ def agent_filtre(candidats):
         except:
             continue
 
-        # 2. Vérification technique (5 voyants)
         ana = voyants(ticker)
         if not ana or not ana["tous_verts"]: continue
         
@@ -462,7 +456,8 @@ def main():
         log.info(f"DIAGNOSTIC -> Marketaux Key: {'OK' if MARKETAUX_API_KEY else 'MANQUANT'}")
         return
 
-    if a.test or a.une_fonce if hasattr(a, 'une_fonce') else a.une_fonce:
+    # LA CORRECTION EST ICI (plus de 'une_fonce')
+    if a.test or a.une_fois:
         un_passage()
         return
 
