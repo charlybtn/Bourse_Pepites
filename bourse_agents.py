@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Système d'agents IA pour la bourse - Chasseur de Pépites (Europe, EUR).
-Analyse des faits via l'API Marketaux (sentiment_score).
+Recherche ultra-large (milliers d'entreprises) + Filtrage Python.
 """
 import argparse, json, logging, math, os, re, smtplib, sys, time, warnings, base64
 from datetime import datetime, timedelta
@@ -54,8 +54,8 @@ FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 MIN_ACTIONS = 10
 HORIZON_MAX_SEANCES = 30  
 TAUX_REUSSITE_MIN = 0.60  
-MAX_DOSSIERS = 500        
-DELAI_MEMOIRE_HEURES = 24 
+MAX_DOSSIERS = 3000       # <-- AUGMENTÉ : On peut aller jusqu'à 3000
+DELAI_MEMOIRE_JOURS = 30  
 
 PAYS_PEA = {"FR", "DE", "NL", "IT", "ES", "BE", "PT", "IE", "LU", "FI", "AT", "GR"}
 
@@ -99,6 +99,12 @@ def mettre_a_jour_memoire_github(ticker):
     url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/memoire_alertes.json"
     memoire = lire_memoire_github()
     memoire[ticker] = datetime.now().isoformat()
+    
+    maintenant = datetime.now()
+    memoire = {
+        k: v for k, v in memoire.items() 
+        if maintenant - datetime.fromisoformat(v) < timedelta(days=DELAI_MEMOIRE_JOURS)
+    }
     
     contenu_encode = base64.b64encode(json.dumps(memoire, indent=1).encode("utf-8")).decode("utf-8")
     
@@ -258,7 +264,6 @@ def calculer_score_local(ticker):
     except: return 50, "Analyse indisponible."
 
 def analyser_actualites_marketaux(ticker):
-    """Récupère le sentiment des actualités via l'API Marketaux."""
     if not MARKETAUX_API_KEY:
         return None, "Clé Marketaux manquante."
     
@@ -272,7 +277,6 @@ def analyser_actualites_marketaux(ticker):
         if not articles:
             return None, "Aucun article trouvé."
             
-        # On cherche le sentiment moyen des entités liées à cette action
         sentiments = []
         for art in articles:
             for entity in art.get("entities", []):
@@ -286,14 +290,13 @@ def analyser_actualites_marketaux(ticker):
             
         sentiment_moyen = sum(sentiments) / len(sentiments)
         
-        # On garde l'article le plus récent avec un sentiment positif
         meilleur_article = None
         for art in articles:
             if art.get("entities") and art["entities"][0].get("sentiment_score", 0) > 0.1:
                 meilleur_article = art.get("title")
                 break
                 
-        if sentiment_moyen > 0.1: # Seuil de positivité
+        if sentiment_moyen > 0.1:
             return meilleur_article or "Sentiment positif détecté", f"Sentiment moyen : {sentiment_moyen:.2f}"
         else:
             return None, f"Sentiment trop faible ou négatif ({sentiment_moyen:.2f})"
@@ -304,10 +307,14 @@ def analyser_actualites_marketaux(ticker):
 # ----------------------------------------------------------------- AGENTS
 def agent_actualites():
     candidats = set()
+    
+    # On ratisse TOUTE l'Europe (y compris les places non-EUR pour le volume, le filtre EUR se fera après)
     places = [
         ('PAR', 'France'), ('FRA', 'Allemagne'), ('GER', 'Allemagne'),
         ('AMS', 'Pays-Bas'), ('BRU', 'Belgique'), ('MIL', 'Italie'), 
-        ('MCE', 'Espagne'), ('LIS', 'Portugal')
+        ('MCE', 'Espagne'), ('LIS', 'Portugal'), ('STO', 'Suède'),
+        ('OSL', 'Norvège'), ('CPH', 'Danemark'), ('HEL', 'Finlande'),
+        ('VIE', 'Autriche'), ('ATH', 'Grèce')
     ]
     
     for exchange, pays in places:
@@ -315,50 +322,63 @@ def agent_actualites():
             EquityQuery('eq', ['exchange', exchange]),
             EquityQuery('lt', ['intradayprice', PRIX_MAX]),
             EquityQuery('gt', ['intradayprice', 1.0]),
-            EquityQuery('lt', ['intradaymarketcap', 3000000000]),
-            EquityQuery('gt', ['intradaymarketcap', 50000000]),
-            EquityQuery('gt', ['avgdailyvol3m', 100000])
+            # ON A RETIRÉ LE FILTRE DE CAPITALISATION (Market Cap)
+            EquityQuery('gt', ['avgdailyvol3m', 50000]) 
         ])
         
-        for page in range(2):
-            offset = page * 50
+        # ON AUGMENTE LE NOMBRE DE PAGES (ex: 10 pages de 100 = 1000 par pays)
+        for page in range(10):
+            offset = page * 100
             try:
-                log.info(f"Agent 1 : Recherche en {pays} (page {page + 1}/2)...")
-                res = yf.screen(q, size=50, offset=offset, sortField='intradaymarketcap', sortAsc=False)
-                for quote in res.get("quotes", []):
+                log.info(f"Agent 1 : Recherche en {pays} (page {page + 1}/10)...")
+                res = yf.screen(q, size=100, offset=offset, sortField='intradaymarketcap', sortAsc=False)
+                quotes = res.get("quotes", [])
+                if not quotes: break # S'il n'y a plus de résultats, on arrête pour ce pays
+                for quote in quotes:
                     sym = quote.get("symbol", "")
                     if quote.get("quoteType") == "EQUITY" and sym.endswith(SUFFIXES): 
                         candidats.add(sym)
             except Exception as e:
                 log.error(f"Échec du screener ({pays}, page {page + 1}) : {e}")
-            time.sleep(3)
+            time.sleep(2)
     
-    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées en Europe.")
+    log.info(f"Agent 1 : {len(candidats)} pépites uniques trouvées en Europe (Toutes capitalisations).")
     if not candidats: 
         candidats.update(TICKERS_SECOURS)
     return list(candidats)
 
 def agent_filtre(candidats):
     retenus = []
+    
+    # OPTIMISATION : On filtre le prix et la devise AVANT de télécharger l'historique
     for i, ticker in enumerate(candidats[:MAX_DOSSIERS]):
-        time.sleep(0.8) 
-        if i > 0 and i % 25 == 0:
-            log.info(f"  ... {i} actions analysées sur {min(len(candidats), MAX_DOSSIERS)} ...")
+        time.sleep(0.3) 
+        if i > 0 and i % 100 == 0:
+            log.info(f"  ... {i} actions vérifiées sur {min(len(candidats), MAX_DOSSIERS)} ...")
 
+        # 1. Vérification rapide (Prix, Devise)
+        try:
+            fi = yf.Ticker(ticker).fast_info
+            if fi.currency != "EUR" or fi.last_price > PRIX_MAX or fi.last_price < 1.0:
+                continue
+            prix = round(float(fi.last_price), 3)
+            prec = float(fi.previous_close)
+            var_pct = round((prix / prec - 1) * 100, 2)
+        except:
+            continue
+
+        # 2. Vérification technique (5 voyants)
         ana = voyants(ticker)
         if not ana or not ana["tous_verts"]: continue
         
         if ana["volatilite"] < 1.5:
             continue
 
-        try:
-            cot = cotation(ticker)
-            if cot["prix"] > PRIX_MAX: continue
-        except: continue
-        ana.update(cot)
+        ana["prix"] = prix
+        ana["var_pct"] = var_pct
         ana["nom"] = ticker.split('.')[0]
         retenus.append(ana)
-        log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {cot['prix']}")
+        log.info(f"  -> {ticker} validé (5/5 voyants) ! Prix: {prix} €")
         
     log.info("Agent 3 : %d titres passent le filtre technique", len(retenus))
     return retenus
@@ -366,26 +386,24 @@ def agent_filtre(candidats):
 def agent_analyse_fondamentale(titre):
     ticker = titre["ticker"]
     memoire = lire_memoire_github()
+    
     if ticker in memoire:
         derniere_alerte = datetime.fromisoformat(memoire[ticker])
-        if datetime.now() - derniere_alerte < timedelta(hours=DELAI_MEMOIRE_HEURES):
+        if datetime.now() - derniere_alerte < timedelta(days=DELAI_MEMOIRE_JOURS):
+            log.info(f"  -> {ticker} ignoré : déjà alerté il y a moins de {DELAI_MEMOIRE_JOURS} jours.")
             return None
 
-    # 1. Analyse des faits via Marketaux
     fait, msg_sentiment = analyser_actualites_marketaux(ticker)
     log.info(f"  -> {ticker} Marketaux : {msg_sentiment}")
     if not fait:
         return None 
 
-    # 2. Calcul du prix cible (pour +10% net)
     prix_cible = prix_minimum_pour_10_net(titre["prix"])
     hausse_requise_pct = ((prix_cible - titre["prix"]) / titre["prix"]) * 100
     
-    # 3. Vérification historique
     taux, duree = historique_cible(titre["_h"], hausse_requise_pct)
     if taux < TAUX_REUSSITE_MIN: return None
 
-    # 4. Score financier
     score, raison = calculer_score_local(ticker)
     if score < SCORE_MIN: return None
 
@@ -444,7 +462,7 @@ def main():
         log.info(f"DIAGNOSTIC -> Marketaux Key: {'OK' if MARKETAUX_API_KEY else 'MANQUANT'}")
         return
 
-    if a.test or a.une_fois:
+    if a.test or a.une_fonce if hasattr(a, 'une_fonce') else a.une_fonce:
         un_passage()
         return
 
