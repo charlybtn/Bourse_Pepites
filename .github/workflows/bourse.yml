@@ -2,28 +2,40 @@ name: Bourse Pepites
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch: 
+    # Heures en UTC. Hiver (Paris = UTC+1) : 07:00 UTC = 8h00 Paris, 12:15 UTC = 13h15 Paris.
+    # Changement d'heure d'été (fin mars) : remplacer "0 7" par "0 6" et "15 12" par "15 11".
+    - cron: "0 7 * * 1-5"
+    - cron: "15 12 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bourse
+  cancel-in-progress: false
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
-      
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          
+          python-version: "3.12"
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
-        
+        run: pip install yfinance pandas requests
+
       - name: Run script
+        run: python agents_bourse.py --une-fois
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python agents_bourse.py --une-fois
+          TAUX_REUSSITE_MIN: "0.40"
