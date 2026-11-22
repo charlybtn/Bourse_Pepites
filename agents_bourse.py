@@ -82,7 +82,7 @@ PRIX_MAX = 80.0
 PRIX_MIN = 1.0
 SCORE_MIN = 65
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
-MIN_ACTIONS = 10
+BUDGET_PAR_TRADE = float(os.getenv("BUDGET_PAR_TRADE", "250"))   # euros investis par action alertée
 OBJECTIF_NET = 0.10                 # +10 % net visé
 # Prélèvements sociaux sur la plus-value (PEA de plus de 5 ans). À vérifier selon ton enveloppe.
 TAUX_PRELEVEMENTS = float(os.getenv("TAUX_PRELEVEMENTS", "0.172"))
@@ -104,7 +104,7 @@ FENETRE_DEBUT = (9, 0)              # jours ouvrés, heure de Paris
 FENETRE_FIN = (17, 30)
 CACHE_CANDIDATS_MIN = 60            # la liste des candidats (screener) est rafraîchie toutes les 60 min
 CACHE_ACTUS_MIN = 60                # une réponse Marketaux est réutilisée pendant 60 min (quota gratuit)
-SOURCE_CANDIDATS = (os.getenv("SOURCE_CANDIDATS") or "crible").lower()   # "crible" (fichier CSV) ou "yahoo" (recherche large)
+SOURCE_CANDIDATS = (os.getenv("SOURCE_CANDIDATS") or "auto").lower()   # "auto" (CSV Crible s'il existe, sinon Yahoo), "crible" ou "yahoo"
 FICHIER_CRIBLE = Path(os.getenv("FICHIER_CRIBLE") or (DOSSIER / "crible_output.csv"))
 FONDAMENTAL_LOCAL = env_bool("FONDAMENTAL_LOCAL", True)   # 0 = on fait confiance au filtrage fondamental de Crible
 
@@ -289,9 +289,14 @@ def frais(montant):
     return 4.90 if montant <= 3000 else montant * 0.0015
 
 
+def quantite_pour(prix):
+    """Nombre d'actions achetées avec le budget (sans le dépasser)."""
+    return max(1, int(BUDGET_PAR_TRADE // prix))
+
+
 def prix_minimum_pour_objectif_net(prix_achat):
     """Prix de vente minimal pour gagner OBJECTIF_NET net (frais d'achat + de vente + prélèvements)."""
-    n = MIN_ACTIONS
+    n = quantite_pour(prix_achat)
     valeur_achat = n * prix_achat
     cout_total = valeur_achat + frais(valeur_achat)
     gain_brut = cout_total * OBJECTIF_NET / (1 - TAUX_PRELEVEMENTS)
@@ -688,6 +693,12 @@ def agent_screener_yahoo():
     return garde, False
 
 
+def source_candidats():
+    if SOURCE_CANDIDATS == "auto":
+        return "crible" if FICHIER_CRIBLE.exists() else "yahoo"
+    return SOURCE_CANDIDATS
+
+
 def lire_crible():
     """Lit la liste générée par Crible. Renvoie {} si le fichier est absent, vide ou illisible."""
     if not FICHIER_CRIBLE.exists():
@@ -730,7 +741,7 @@ def lire_crible():
 
 def agent_actualites():
     """Agent 1 : liste des candidats. Renvoie (dict, est_liste_de_secours)."""
-    if SOURCE_CANDIDATS == "yahoo":
+    if source_candidats() == "yahoo":
         return agent_screener_yahoo()
     candidats = lire_crible()
     if candidats:
@@ -836,6 +847,7 @@ def agent_analyse_fondamentale(titre, memoire):
 
     return {
         "ticker": ticker, "nom": nom, "isin": isin, "pea": pea, "prix": titre["prix"],
+        "quantite": quantite_pour(titre["prix"]),
         "score_fin": score, "raison_fin": raison, "taux_hist": round(taux * 100, 1),
         "duree_hist": duree, "mode_backtest": mode, "prix_cible": prix_cible,
         "fait": fait, "analystes": txt_analystes,
@@ -874,7 +886,7 @@ def envoyer_pepite(r, memoire):
         return False
     corps = (
         f"{r['nom']} {r['isin']}\n"
-        f"Achat {MIN_ACTIONS} a {r['prix']:.2f} Euros et vente a {r['prix_cible']:.2f} Euros "
+        f"Achat {r['quantite']} a {r['prix']:.2f} Euros et vente a {r['prix_cible']:.2f} Euros "
         f"dans environ {formater_duree(r['duree_hist'])}"
     )
     log.info("Pépite retenue : %s | %s | %s | news : %s", r["ticker"], r["raison_fin"],
@@ -888,7 +900,8 @@ def envoyer_pepite(r, memoire):
     memoire[r["ticker"]] = maintenant().isoformat()
     memoriser_alerte(r["ticker"])
     try:
-        suivi.enregistrer_alerte(r["ticker"], r["nom"], r["isin"], r["prix"], r["prix_cible"], r["duree_hist"])
+        suivi.enregistrer_alerte(r["ticker"], r["nom"], r["isin"], r["prix"], r["prix_cible"], r["duree_hist"],
+                                  quantite=r["quantite"])
     except Exception as e:
         anomalie(f"Suivi : enregistrement impossible ({type(e).__name__}).")
     return True
@@ -928,7 +941,7 @@ def agent_superviseur():
 
 def candidats_du_moment():
     """Liste des candidats : rafraîchie toutes les CACHE_CANDIDATS_MIN minutes seulement (le screener est lent)."""
-    if SOURCE_CANDIDATS != "yahoo":
+    if source_candidats() != "yahoo":
         return agent_actualites()[0]     # lecture de fichier : pas besoin de cache
     heure, donnees = _cache_candidats["heure"], _cache_candidats["donnees"]
     if donnees and heure and maintenant() - heure < timedelta(minutes=CACHE_CANDIDATS_MIN):
@@ -997,8 +1010,8 @@ def main():
         log.info("DIAGNOSTIC -> Gmail Pwd: %s", "OK" if GMAIL_APP_PASSWORD else "MANQUANT")
         log.info("DIAGNOSTIC -> Destinataire: %s", "OK" if DEST_EMAIL else "MANQUANT")
         log.info("DIAGNOSTIC -> Marketaux Key: %s", "OK" if MARKETAUX_API_KEY else "MANQUANT")
-        log.info("DIAGNOSTIC -> Source des candidats: %s", SOURCE_CANDIDATS)
-        if SOURCE_CANDIDATS != "yahoo":
+        log.info("DIAGNOSTIC -> Source des candidats: %s", source_candidats())
+        if source_candidats() != "yahoo":
             log.info("DIAGNOSTIC -> %s: %s", FICHIER_CRIBLE.name,
                      f"{len(lire_crible())} symboles utilisables" if FICHIER_CRIBLE.exists() else "INTROUVABLE")
         log.info("DIAGNOSTIC -> Mémoire des alertes: %s",
