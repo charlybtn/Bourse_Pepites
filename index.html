@@ -58,7 +58,7 @@ svg.gr{width:100%;height:auto;display:block;margin-bottom:4px}
 const RAW = location.hostname.endsWith("github.io")
   ? `https://raw.githubusercontent.com/${location.hostname.split(".")[0]}/${location.pathname.split("/")[1]}/main/suivi.json`
   : "suivi.json";
-const HORIZON = 30;
+const HORIZON = 10;   // valeur par défaut ; chaque alerte porte son propre horizon
 const $ = s => document.querySelector(s);
 const eur = n => n.toLocaleString("fr-FR", {style: "currency", currency: "EUR"});
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -146,8 +146,8 @@ function carte(a) {
     <div class="haut"><div><span class="nom">${esc(a.nom)}</span> <span class="tick">${esc(a.ticker)}</span></div>
       <span class="badge ${c.statut}">${LABEL[c.statut] || esc(c.statut)}</span></div>
     <div class="barre"><i style="width:${c.prog.toFixed(0)}%"></i></div>
-    <div class="ligne"><span>Achat ${eur(c.entree)}</span><span>${c.fin ? "Sortie" : "Actuel"} ${eur(c.px)}</span><span>Cible ${eur(a.prix_cible)}</span></div>
-    <div class="ligne" style="margin-top:6px"><span>${a.seances ?? 0}/${HORIZON} séances · ${c.qte} actions</span>
+    <div class="ligne"><span>Entrée ${eur(c.entree)}</span><span>${c.fin ? "Sortie" : "Actuel"} ${eur(c.px)}</span><span>Sortie visée ${eur(a.prix_cible)} (+${((a.prix_cible / a.prix_alerte - 1) * 100).toFixed(0)} %)</span></div>
+    <div class="ligne" style="margin-top:6px"><span>${a.seances ?? 0}/${a.horizon ?? HORIZON} séances · durée estimée ~${a.duree_estimee_seances ?? "?"} séances · ${c.qte} actions</span>
       <span class="gain ${cls}">${sg}${eur(c.net)} (${sg}${c.pct.toFixed(1)} %)</span></div></div>
     ${OUVERT === CLE(a) ? detail(a, c) : ""}</div>`;
 }
