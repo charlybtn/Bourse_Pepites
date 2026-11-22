@@ -23,6 +23,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
@@ -83,11 +84,12 @@ PRIX_MIN = 1.0
 SCORE_MIN = 65
 FORMULE = (os.getenv("FORMULE_FORTUNEO") or "progress").lower()
 BUDGET_PAR_TRADE = float(os.getenv("BUDGET_PAR_TRADE", "250"))   # euros investis par action alertée
-OBJECTIF_NET = 0.10                 # +10 % net visé
-# Prélèvements sociaux sur la plus-value (PEA de plus de 5 ans). À vérifier selon ton enveloppe.
-TAUX_PRELEVEMENTS = float(os.getenv("TAUX_PRELEVEMENTS", "0.172"))
-HORIZON_MAX_SEANCES = 30
-TAUX_REUSSITE_MIN = 0.60
+OBJECTIF_NET = float(os.getenv("OBJECTIF_NET", "0.10"))   # +10 % net de frais (achat + vente)
+# Objectif « frais compris », sans impôt : 0 par défaut (mets 0.172 pour inclure les prélèvements sociaux d'un PEA de plus de 5 ans).
+TAUX_PRELEVEMENTS = float(os.getenv("TAUX_PRELEVEMENTS", "0"))
+HORIZON_MAX_SEANCES = int(os.getenv("HORIZON_SEANCES", "10"))      # objectif atteint en 10 séances maximum
+# Part minimale des cas passés où le cours a atteint l'objectif dans le délai. À ajuster selon les journaux.
+TAUX_REUSSITE_MIN = float(os.getenv("TAUX_REUSSITE_MIN", "0.40"))
 MIN_SIGNAUX = 5                     # minimum de jours "5/5 voyants" pour un backtest conditionnel
 VOLATILITE_MIN = 1.5
 SEUIL_ANALYSTES = 0.65              # 65 % d'avis à l'achat
@@ -109,9 +111,11 @@ FICHIER_CRIBLE = Path(os.getenv("FICHIER_CRIBLE") or (DOSSIER / "crible_output.c
 FONDAMENTAL_LOCAL = env_bool("FONDAMENTAL_LOCAL", True)   # 0 = on fait confiance au filtrage fondamental de Crible
 
 # --- Options (modifiables dans le .env : 0 ou 1)
-ACTUS_OBLIGATOIRES = env_bool("ACTUS_OBLIGATOIRES", True)
+ACTUS_OBLIGATOIRES = env_bool("ACTUS_OBLIGATOIRES", False)   # 1 = refuser aussi les titres sans aucune actualité trouvée
+SEUIL_SENTIMENT_NEGATIF = -0.10   # actualités consultées pour CHAQUE finaliste ; refus si le sentiment moyen est négatif
+CIBLE_MAX_PCT = float(os.getenv("CIBLE_MAX_PCT", "30"))   # plafond de la hausse visée (en %)
 ANALYSTES_STRICT = env_bool("ANALYSTES_STRICT", False)   # 1 = refuse les titres sans analyste
-FILTRE_MARCHE = env_bool("FILTRE_MARCHE", True)          # 1 = pas d'achat si le marché est sous sa MM200
+FILTRE_MARCHE = env_bool("FILTRE_MARCHE", False)         # 1 = pas d'achat si le marché est sous sa MM200 (désactivé)
 
 MARCHE_INDICE = "^STOXX50E"
 CHUTE_MARCHE_MAX_PCT = -3.0         # disjoncteur : indice qui chute de plus de 3 % en un jour
@@ -387,6 +391,44 @@ def historique_cible(h, hausse_pct, signal=None):
     return taux, duree, n, "global"
 
 
+def niveau_probable(h, signal=None):
+    """Hausse (en %) atteinte à un moment des HORIZON séances suivantes dans au moins
+    TAUX_REUSSITE_MIN des cas passés (jours « 5 voyants verts » si assez nombreux, sinon tous les jours)."""
+    hi, cl = h["High"].values, h["Close"].values
+    n = len(cl) - HORIZON_MAX_SEANCES
+    if n <= 0:
+        return None, 0, "aucun"
+    idx, mode = ([i for i in range(n) if bool(signal.iloc[i])] if signal is not None else []), "conditionnel"
+    if len(idx) < MIN_SIGNAUX:
+        idx, mode = list(range(n)), "global"
+    exc = [(hi[i + 1:i + 1 + HORIZON_MAX_SEANCES].max() / cl[i] - 1) * 100 for i in idx]
+    return float(np.percentile(exc, (1 - TAUX_REUSSITE_MIN) * 100)), len(idx), mode
+
+
+def gain_net_vise(prix, prix_cible, q):
+    """Gain net (€ et % du capital engagé), frais d'achat et de vente compris."""
+    achat, vente = prix * q, prix_cible * q
+    cout = achat + frais(achat)
+    brut = (vente - frais(vente)) - cout
+    net = brut * (1 - TAUX_PRELEVEMENTS) if brut > 0 else brut
+    return net, net / cout * 100
+
+
+def actualites_yahoo(t, n=3):
+    """Derniers titres Yahoo Finance sur l'entreprise (gratuit, sans clé)."""
+    try:
+        titres = []
+        for item in (t.news or [])[:10]:
+            titre = (item.get("content", item) or {}).get("title")
+            if titre:
+                titres.append(str(titre)[:140])
+            if len(titres) >= n:
+                break
+        return titres
+    except Exception:
+        return []
+
+
 def telecharger_historiques(tickers):
     """Téléchargement groupé (beaucoup plus rapide et moins bloqué que ticker par ticker)."""
     resultat = {}
@@ -628,10 +670,7 @@ def _interroger_marketaux(ticker):
         return None, "Pas de score de sentiment pour cette action.", True
 
     moyen = sum(s for s, _ in notes) / len(notes)
-    if moyen > 0.1:
-        meilleur = max(notes, key=lambda x: x[0])[1]
-        return (meilleur or "Sentiment positif détecté"), f"Sentiment moyen : {moyen:.2f}", True
-    return None, f"Sentiment trop faible ou négatif ({moyen:.2f})", True
+    return {"moyen": moyen, "titres": sorted(notes, key=lambda x: x[0])}, f"Sentiment moyen : {moyen:.2f}", True
 
 
 def analyser_actualites_marketaux(ticker):
@@ -640,10 +679,10 @@ def analyser_actualites_marketaux(ticker):
     en_cache = _cache_actus.get(ticker)
     if en_cache and maint - en_cache[0] < timedelta(minutes=CACHE_ACTUS_MIN):
         return en_cache[1], en_cache[2]
-    fait, msg, definitif = _interroger_marketaux(ticker)
+    info, msg, definitif = _interroger_marketaux(ticker)
     if definitif:
-        _cache_actus[ticker] = (maint, fait, msg)
-    return fait, msg
+        _cache_actus[ticker] = (maint, info, msg)
+    return info, msg
 
 
 # ----------------------------------------------------------------- AGENTS
@@ -787,14 +826,20 @@ def agent_analyse_fondamentale(titre, memoire):
         compter("rejet_deja_alerte")
         return None
 
-    prix_cible = prix_minimum_pour_objectif_net(titre["prix"])
-    hausse_requise_pct = (prix_cible / titre["prix"] - 1) * 100
-    taux, duree, nb_cas, mode = historique_cible(titre["h"], hausse_requise_pct, titre["signal"])
-    log.info("  -> %s backtest %s : %.0f %% de réussite sur %d cas (+%.1f %% requis)",
-             ticker, mode, taux * 100, nb_cas, hausse_requise_pct)
-    if taux < TAUX_REUSSITE_MIN:
+    prix_min = prix_minimum_pour_objectif_net(titre["prix"])               # minimum pour gagner 10 % net
+    hausse_min_pct = (prix_min / titre["prix"] - 1) * 100
+    niveau, nb_cas, mode = niveau_probable(titre["h"], titre["signal"])
+    log.info("  -> %s backtest %s (%d cas) : hausse probable +%s %% (minimum requis +%.1f %%)",
+             ticker, mode, nb_cas, "n/a" if niveau is None else f"{niveau:.1f}", hausse_min_pct)
+    if niveau is None or niveau < hausse_min_pct:
         compter("rejet_backtest")
         return None
+    niveau = math.floor(min(niveau, CIBLE_MAX_PCT) * 2) / 2                # cible = hausse probable (ex. +20 %), pas le minimum
+    prix_cible = max(prix_min, round(titre["prix"] * (1 + niveau / 100), 2))
+    hausse_pct = (prix_cible / titre["prix"] - 1) * 100
+    taux, duree, _, _ = historique_cible(titre["h"], hausse_pct, titre["signal"])
+    quantite = quantite_pour(titre["prix"])
+    gain_eur, gain_pct = gain_net_vise(titre["prix"], prix_cible, quantite)
 
     t = yf.Ticker(ticker)
 
@@ -837,19 +882,31 @@ def agent_analyse_fondamentale(titre, memoire):
             return None
         txt_analystes = f"{pct * 100:.0f} % d'avis à l'achat ({nb_analystes} analystes)"
 
-    fait, msg_sentiment = analyser_actualites_marketaux(ticker)
-    log.info("  -> %s Marketaux : %s", ticker, msg_sentiment)
-    if not fait:
-        if ACTUS_OBLIGATOIRES:
-            compter("rejet_actualites")
-            return None
-        fait = "Aucune actualité positive (non bloquant)"
+    info_actu, msg_actu = analyser_actualites_marketaux(ticker)           # actualités TOUJOURS consultées
+    titres_y = actualites_yahoo(t)
+    log.info("  -> %s actualités : %s | %d titre(s) Yahoo", ticker, msg_actu, len(titres_y))
+    if info_actu and (info_actu["moyen"] <= SEUIL_SENTIMENT_NEGATIF or info_actu["titres"][0][0] <= -0.4):
+        compter("rejet_actualites_negatives")
+        return None
+    if not info_actu and ACTUS_OBLIGATOIRES:
+        compter("rejet_actualites")
+        return None
+    lignes_actus = []
+    if info_actu:
+        lignes_actus.append(f"Marketaux (7 jours) : sentiment moyen {info_actu['moyen']:+.2f} sur {len(info_actu['titres'])} article(s)")
+        lignes_actus += [f"  - [{s:+.1f}] {tt or '(sans titre)'}" for s, tt in info_actu["titres"][:3]]
+    else:
+        lignes_actus.append(f"Marketaux : aucune actualité exploitable ({msg_actu}). Vérifie les actualités avant d'acheter.")
+    if titres_y:
+        lignes_actus += ["Yahoo Finance :"] + [f"  - {tt}" for tt in titres_y]
+    fait = "\n".join(lignes_actus)
 
     return {
         "ticker": ticker, "nom": nom, "isin": isin, "pea": pea, "prix": titre["prix"],
         "quantite": quantite_pour(titre["prix"]),
         "score_fin": score, "raison_fin": raison, "taux_hist": round(taux * 100, 1),
         "duree_hist": duree, "mode_backtest": mode, "prix_cible": prix_cible,
+        "hausse_pct": hausse_pct, "gain_net_eur": gain_eur, "gain_net_pct": gain_pct,
         "fait": fait, "analystes": txt_analystes,
     }
 
@@ -887,7 +944,14 @@ def envoyer_pepite(r, memoire):
     corps = (
         f"{r['nom']} {r['isin']}\n"
         f"Achat {r['quantite']} a {r['prix']:.2f} Euros et vente a {r['prix_cible']:.2f} Euros "
-        f"dans environ {formater_duree(r['duree_hist'])}"
+        f"dans environ {formater_duree(r['duree_hist'])}\n\n"
+        f"PRIX D'ENTRÉE : {r['prix']:.2f} €\n"
+        f"PRIX DE SORTIE : {r['prix_cible']:.2f} € (+{r['hausse_pct']:.1f} %) -> gain net estimé "
+        f"{r['gain_net_eur']:+.2f} € ({r['gain_net_pct']:+.1f} %), frais compris\n"
+        f"DURÉE ESTIMÉE ENTRE LES DEUX : environ {r['duree_hist']} séances de bourse "
+        f"({formater_duree(r['duree_hist'])}), maximum {HORIZON_MAX_SEANCES} séances\n"
+        f"FIABILITÉ : cible atteinte dans {r['taux_hist']:.0f} % des cas passés similaires\n\n"
+        f"ACTUALITÉS :\n{r['fait']}"
     )
     log.info("Pépite retenue : %s | %s | %s | news : %s", r["ticker"], r["raison_fin"],
              r["analystes"], str(r["fait"])[:80])
@@ -930,8 +994,8 @@ def signaler_au_superviseur(sujet, lignes):
 
 def agent_superviseur():
     """Agent 5 : seul à écrire pour signaler une anomalie. Silencieux si tout va bien."""
-    if ACTUS_OBLIGATOIRES and not MARKETAUX_API_KEY:
-        anomalie("Clé Marketaux manquante : aucune pépite ne peut être validée.")
+    if not MARKETAUX_API_KEY:
+        anomalie("Clé Marketaux manquante : les actualités ne sont pas consultées.")
     cands = STATS.get("candidats", 0)
     if cands and STATS.get("historiques_recus", 0) < 0.5 * cands:
         anomalie("Historiques Yahoo incomplets (moins de la moitié reçus).")
