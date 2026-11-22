@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pépites</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#0f766e">
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--txt:#14181f;--mut:#667085;--ok:#0a7d3c;--ko:#c42b1c;--acc:#0f766e;--line:#e4e7ec;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#171b22;--txt:#eef1f5;--mut:#9aa4b2;--ok:#3ccf7a;--ko:#ff6b5b;--acc:#2dd4bf;--line:#262c36}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:560px;margin:0 auto;padding:16px}
+h1{font-size:22px;margin:4px 0 2px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:14px}
+.resume{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:16px}
+.resume div,.carte{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.resume b{display:block;font-size:20px}
+.resume span,.tick{color:var(--mut);font-size:12px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:18px 0 8px}
+.carte{margin-bottom:10px}
+.clic{cursor:pointer}
+.haut{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.nom{font-weight:600}
+.badge{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}
+.cible_atteinte,.vendue{color:var(--ok);border-color:var(--ok)}
+.delai_depasse{color:var(--ko);border-color:var(--ko)}
+.barre{height:8px;background:var(--line);border-radius:4px;margin:10px 0 6px;overflow:hidden}
+.barre i{display:block;height:100%;background:var(--acc)}
+.ligne{display:flex;justify-content:space-between;gap:6px;font-size:13px;color:var(--mut)}
+.gain{font-weight:600}
+.pos{color:var(--ok)}.neg{color:var(--ko)}
+.vide{color:var(--mut);text-align:center;padding:40px 0}
+.det{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.det label,.pied label{display:block;font-size:12px;color:var(--mut);margin:6px 0 2px}
+input{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--txt)}
+.grille{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--txt)}
+button.pri{background:var(--acc);border-color:var(--acc);color:var(--bg)}
+button.dng{color:var(--ko);border-color:var(--ko)}
+svg.gr{width:100%;height:auto;display:block;margin-bottom:4px}
+.pied{margin-top:24px;max-width:200px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Suivi des pépites</h1>
+  <div class="sub" id="maj">Chargement…</div>
+  <div class="resume" id="resume"></div>
+  <div id="liste"></div>
+  <div class="pied"><label>Frais par ordre (€), achat ou vente</label><input id="frais" type="number" step="0.01" inputmode="decimal" onchange="majFrais(this.value)"></div>
+</main>
+<script>
+// Le nom du dépôt est lu dans l'adresse de la page : rien à modifier si tu le renommes.
+const RAW = location.hostname.endsWith("github.io")
+  ? `https://raw.githubusercontent.com/${location.hostname.split(".")[0]}/${location.pathname.split("/")[1]}/main/suivi.json`
+  : "suivi.json";
+const HORIZON = 30;
+const $ = s => document.querySelector(s);
+const eur = n => n.toLocaleString("fr-FR", {style: "currency", currency: "EUR"});
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const fd = s => new Date(s).toLocaleDateString("fr-FR", {day: "numeric", month: "short"});
+const LABEL = {en_cours: "En cours", cible_atteinte: "Cible atteinte", delai_depasse: "Délai dépassé", vendue: "Vendue"};
+const CLE = a => a.ticker + "|" + a.date_alerte;
+
+let DATA = {alertes: []}, OUVERT = null, MASQUEES = false;
+let REG = {};
+try { REG = JSON.parse(localStorage.getItem("reglages")) || {}; } catch (e) {}
+const sauver = () => { try { localStorage.setItem("reglages", JSON.stringify(REG)); } catch (e) {} };
+const FRAIS = () => REG.frais ?? 4.9;
+const ov = a => (REG.a || {})[CLE(a)] || {};
+const trouver = k => DATA.alertes.find(a => CLE(a) === k);
+
+function serie(n, d, f) {
+  return Array.from({length: n}, (_, i) => [new Date(Date.now() - (n - i) * 864e5).toISOString().slice(0, 10),
+    +(d + (f - d) * i / (n - 1) + Math.sin(i / 4) * d * 0.04).toFixed(2)]);
+}
+const DEMO = {maj: new Date().toISOString(), alertes: [
+  {ticker: "GTT.PA", nom: "GTT SA", date_alerte: new Date(Date.now() - 12 * 864e5).toISOString(), prix_alerte: 20, prix_cible: 23.5, quantite: 12, prix_actuel: 22.1, seances: 8, statut: "en_cours", historique: serie(120, 17, 22.1)},
+  {ticker: "SW.PA", nom: "Sodexo", date_alerte: new Date(Date.now() - 40 * 864e5).toISOString(), prix_alerte: 55, prix_cible: 63, quantite: 4, prix_cloture: 63, seances: 20, statut: "cible_atteinte", historique: serie(120, 50, 63)}
+]};
+
+async function charger() {
+  if (location.search.includes("demo")) return DEMO;
+  try {
+    const r = await fetch(RAW + "?t=" + Date.now(), {cache: "no-store"});
+    if (!r.ok && r.status !== 404) throw new Error(r.status);
+    const d = r.ok ? await r.json() : {alertes: []};
+    try { localStorage.setItem("suivi", JSON.stringify(d)); } catch (e) {}
+    return d;
+  } catch (e) {
+    let c = null;
+    try { c = localStorage.getItem("suivi"); } catch (e2) {}
+    if (c) { const d = JSON.parse(c); d.hors_ligne = true; return d; }
+    throw e;
+  }
+}
+
+// Gain net = (sortie - entrée) x quantité - frais d'achat - frais de vente (estimés tant que la position est ouverte)
+function calc(a) {
+  const o = ov(a), entree = o.entree ?? a.prix_alerte, qte = o.qte ?? a.quantite;
+  const statut = o.sortie != null ? "vendue" : a.statut, fin = statut !== "en_cours";
+  const px = o.sortie != null ? o.sortie : fin ? a.prix_cloture : (a.prix_actuel ?? entree);
+  const net = (px - entree) * qte - 2 * FRAIS(), investi = entree * qte;
+  const prog = a.prix_cible > entree ? Math.max(0, Math.min(100, (px - entree) / (a.prix_cible - entree) * 100)) : 100;
+  return {o, entree, qte, statut, fin, px, net, investi, pct: net / investi * 100, prog};
+}
+
+function graphique(a, c) {
+  const h = a.historique || [];
+  if (h.length < 2) return '<div class="tick">Graphique disponible après la prochaine mise à jour.</div>';
+  const W = 320, H = 150, P = 6, n = h.length;
+  const vals = h.map(x => x[1]).concat([c.entree, a.prix_cible]);
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const X = i => P + i * (W - 2 * P) / (n - 1), Y = v => (H - P - (v - mn) / (mx - mn || 1) * (H - 2 * P)).toFixed(1);
+  const jour = String(a.date_alerte).slice(0, 10);
+  let ia = h.findIndex(x => x[0] >= jour); if (ia < 0) ia = n - 1;
+  const hl = (v, col) => `<line x1="${P}" x2="${W - P}" y1="${Y(v)}" y2="${Y(v)}" stroke="${col}" stroke-dasharray="4 3"/>`;
+  return `<svg class="gr" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cours sur plusieurs mois">
+    ${hl(a.prix_cible, "var(--ok)")}${hl(c.entree, "var(--mut)")}
+    <line x1="${X(ia).toFixed(1)}" x2="${X(ia).toFixed(1)}" y1="${P}" y2="${H - P}" stroke="var(--acc)" stroke-dasharray="2 3"/>
+    <polyline points="${h.map((x, i) => X(i).toFixed(1) + "," + Y(x[1])).join(" ")}" fill="none" stroke="var(--txt)" stroke-width="1.6"/>
+  </svg>
+  <div class="ligne"><span>${fd(h[0][0])}</span><span><b class="pos">- -</b> cible · <b>- -</b> entrée · alerte ┆</span><span>${fd(h[n - 1][0])}</span></div>`;
+}
+
+function detail(a, c) {
+  const k = esc(CLE(a));
+  return `<div class="det">${graphique(a, c)}
+    <div class="grille">
+      <div><label>Prix d'entrée (€)</label><input id="e" type="number" step="0.01" inputmode="decimal" value="${c.entree}"></div>
+      <div><label>Quantité</label><input id="q" type="number" step="1" inputmode="numeric" value="${c.qte}"></div>
+      <div><label>Prix de sortie (€)</label><input id="s" type="number" step="0.01" inputmode="decimal" value="${c.o.sortie ?? ""}" placeholder="pas vendue"></div>
+    </div>
+    <div class="btns"><button class="pri" onclick="enregistrer('${k}')">Enregistrer</button>
+      <button onclick="reinit('${k}')">Réinitialiser</button>
+      <button class="dng" onclick="masquer('${k}')">Je ne l'ai pas prise</button></div></div>`;
+}
+
+function carte(a) {
+  const c = calc(a), cls = c.net >= 0 ? "pos" : "neg", sg = c.net >= 0 ? "+" : "", k = esc(CLE(a));
+  return `<div class="carte"><div class="clic" onclick="basculer('${k}')">
+    <div class="haut"><div><span class="nom">${esc(a.nom)}</span> <span class="tick">${esc(a.ticker)}</span></div>
+      <span class="badge ${c.statut}">${LABEL[c.statut] || esc(c.statut)}</span></div>
+    <div class="barre"><i style="width:${c.prog.toFixed(0)}%"></i></div>
+    <div class="ligne"><span>Achat ${eur(c.entree)}</span><span>${c.fin ? "Sortie" : "Actuel"} ${eur(c.px)}</span><span>Cible ${eur(a.prix_cible)}</span></div>
+    <div class="ligne" style="margin-top:6px"><span>${a.seances ?? 0}/${HORIZON} séances · ${c.qte} actions</span>
+      <span class="gain ${cls}">${sg}${eur(c.net)} (${sg}${c.pct.toFixed(1)} %)</span></div></div>
+    ${OUVERT === CLE(a) ? detail(a, c) : ""}</div>`;
+}
+
+function afficher() {
+  const toutes = (DATA.alertes || []).slice().sort((x, y) => String(y.date_alerte).localeCompare(String(x.date_alerte)));
+  const prises = toutes.filter(a => ov(a).pris !== false), masquees = toutes.filter(a => ov(a).pris === false);
+  const cs = prises.map(a => [a, calc(a)]), ouv = cs.filter(([, c]) => !c.fin), fin = cs.filter(([, c]) => c.fin);
+  const total = cs.reduce((s, [, c]) => s + c.net, 0), gagnees = fin.filter(([, c]) => c.net > 0).length;
+  $("#resume").innerHTML = `
+    <div><b>${ouv.length}</b><span>en cours · ${eur(ouv.reduce((s, [, c]) => s + c.investi, 0))} investis</span></div>
+    <div><b class="${total >= 0 ? "pos" : "neg"}">${total >= 0 ? "+" : ""}${eur(total)}</b><span>gain net estimé (frais inclus)</span></div>
+    <div><b>${fin.length ? Math.round(gagnees / fin.length * 100) + " %" : "—"}</b><span>réussite (${gagnees}/${fin.length} terminées)</span></div>
+    <div><b>${masquees.length}</b><span>non prises (masquées)</span></div>`;
+  let html = "";
+  if (ouv.length) html += "<h2>En cours</h2>" + ouv.map(([a]) => carte(a)).join("");
+  if (fin.length) html += "<h2>Terminées</h2>" + fin.map(([a]) => carte(a)).join("");
+  if (masquees.length) {
+    html += `<h2 class="clic" onclick="MASQUEES=!MASQUEES;afficher()">Non prises (${masquees.length}) ${MASQUEES ? "▲" : "▼"}</h2>`;
+    if (MASQUEES) html += masquees.map(a => `<div class="carte haut"><span>${esc(a.nom)} <span class="tick">${esc(a.ticker)} · ${fd(a.date_alerte)}</span></span><button onclick="restaurer('${esc(CLE(a))}')">Restaurer</button></div>`).join("");
+  }
+  $("#liste").innerHTML = html || '<div class="vide">Aucune alerte pour l\'instant.</div>';
+  const m = DATA.maj ? new Date(DATA.maj).toLocaleString("fr-FR", {dateStyle: "short", timeStyle: "short"}) : "jamais";
+  $("#maj").textContent = "Mis à jour : " + m + (DATA.hors_ligne ? " (hors ligne)" : "") + " · cours différés";
+  $("#frais").value = FRAIS();
+}
+
+const maj = (k, f) => { REG.a = REG.a || {}; REG.a[k] = f(REG.a[k] || {}); sauver(); afficher(); };
+const nombre = id => { const x = parseFloat(String($("#" + id).value).replace(",", ".")); return isFinite(x) ? x : null; };
+function basculer(k) { OUVERT = OUVERT === k ? null : k; afficher(); }
+function enregistrer(k) {
+  const a = trouver(k), e = nombre("e"), q = nombre("q"), s = nombre("s");
+  maj(k, o => ({...o, entree: e !== null && e !== a.prix_alerte ? e : null, qte: q !== null && q !== a.quantite ? q : null, sortie: s}));
+}
+function reinit(k) { maj(k, () => ({})); }
+function masquer(k) { OUVERT = null; maj(k, o => ({...o, pris: false})); }
+function restaurer(k) { maj(k, o => { const n = {...o}; delete n.pris; return n; }); }
+function majFrais(v) { const x = parseFloat(String(v).replace(",", ".")); REG.frais = isFinite(x) && x >= 0 ? x : 4.9; sauver(); afficher(); }
+
+charger().then(d => { DATA = d; afficher(); }).catch(() => { $("#maj").textContent = "Impossible de charger les données."; });
+</script>
+</body>
+</html>
