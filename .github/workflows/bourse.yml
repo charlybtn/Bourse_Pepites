@@ -1,0 +1,40 @@
+name: Bourse Pepites
+
+on:
+  schedule:
+    # Toutes les heures de 6h à 15h UTC (jours ouvrés), à la minute 15.
+    # Le script ne travaille qu'aux créneaux 8h, 10h, 12h, 14h et 16h (heure de Paris) :
+    # cela couvre l'heure d'été et l'heure d'hiver sans rien modifier.
+    - cron: "15 6-15 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bourse
+  cancel-in-progress: false
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas requests
+
+      - name: Run script
+        run: python agents_bourse.py --une-fois
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
