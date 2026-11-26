@@ -1,11 +1,10 @@
 name: Bourse Pepites
 
+# Lancement : un service externe (cron-job.org) déclenche ce workflow à l'heure exacte
+# (8h, 10h, 12h, 14h, 16h, heure de Paris, du lundi au vendredi) via l'API GitHub.
+# Le déclencheur « schedule » de GitHub est retiré : il part avec 10 à 40 minutes de retard.
+# Lancement manuel possible à tout moment : Actions -> Bourse Pepites -> Run workflow.
 on:
-  schedule:
-    # Toutes les heures de 6h à 15h UTC (jours ouvrés), à la minute 15.
-    # Le script ne travaille qu'aux créneaux 8h, 10h, 12h, 14h et 16h (heure de Paris) :
-    # cela couvre l'heure d'été et l'heure d'hiver sans rien modifier.
-    - cron: "15 6-15 * * 1-5"
   workflow_dispatch:
 
 permissions:
@@ -37,4 +36,5 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
