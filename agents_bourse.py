@@ -87,9 +87,13 @@ MIN_ANALYSTES = 3
 EVENEMENT_JOURS = 7
 
 # --- Recherche
-MAX_DOSSIERS = 3000
-PAGES_PAR_PLACE = 10
+# Le passage ne dure qu'environ 2 minutes pour ~750 titres : on élargit la recherche.
+# Tout est modifiable depuis le workflow (variables d'environnement) sans toucher au code.
+MAX_DOSSIERS = int(os.getenv("MAX_DOSSIERS", "5000"))             # nombre maximal de titres analysés (les plus liquides d'abord)
+PAGES_PAR_PLACE = int(os.getenv("PAGES_PAR_PLACE", "15"))         # 15 pages de 100 titres par place boursière
+VOLUME_MOYEN_MIN = int(os.getenv("VOLUME_MOYEN_MIN", "10000"))    # volume moyen 3 mois minimal (avant : 30 000)
 TAILLE_LOT_TELECHARGEMENT = 50
+DUREE_MAX_MINUTES = float(os.getenv("DUREE_MAX_MINUTES", "20"))   # garde-fou : arrêt des téléchargements au-delà
 DELAI_MEMOIRE_JOURS = 90
 FREQUENCE_MINUTES = 120                                           # boucle locale uniquement
 FENETRE_DEBUT = (8, 0)
@@ -100,6 +104,7 @@ CACHE_ACTUS_MIN = 60
 SOURCE_CANDIDATS = (os.getenv("SOURCE_CANDIDATS") or "auto").lower()
 FICHIER_CRIBLE = Path(os.getenv("FICHIER_CRIBLE") or (DOSSIER / "crible_output.csv"))
 FONDAMENTAL_LOCAL = env_bool("FONDAMENTAL_LOCAL", True)
+FICHIER_STATUT = DOSSIER / "derniere_execution.json"
 
 # --- Options
 ACTUS_OBLIGATOIRES = env_bool("ACTUS_OBLIGATOIRES", False)
@@ -148,6 +153,7 @@ STATS = {}
 ANOMALIES = []
 _anomalies_envoyees = set()
 _cache_candidats = {"heure": None, "donnees": None}
+_debut_passage = {"t": time.time()}
 
 
 def compter(cle, n=1):
@@ -159,8 +165,29 @@ def anomalie(msg):
     ANOMALIES.append(msg)
 
 
+def duree_depassee():
+    return (time.time() - _debut_passage["t"]) > DUREE_MAX_MINUTES * 60
+
+
 # ----------------------------------------------------------------- MAIL
+def _envoyer_une_fois(m, methode):
+    """methode : 'ssl' (port 465) ou 'starttls' (port 587)."""
+    if methode == "ssl":
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+            s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            s.send_message(m)
+    else:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            s.send_message(m)
+
+
 def envoyer_mail(sujet, corps):
+    """Envoi avec 4 essais : 465 (SSL) puis 587 (STARTTLS) en alternance, pause croissante entre les essais.
+    Corrige les coupures « SMTPServerDisconnected » ponctuelles côté serveur."""
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         raise RuntimeError(
             f"Identifiants manquants (User: {bool(GMAIL_USER)}, Pwd: {bool(GMAIL_APP_PASSWORD)})"
@@ -170,10 +197,20 @@ def envoyer_mail(sujet, corps):
     m = EmailMessage()
     m["Subject"], m["From"], m["To"] = sujet, GMAIL_USER, DEST_EMAIL
     m.set_content(corps)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
-        s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        s.send_message(m)
-    log.info("Mail envoyé : %s", sujet)
+
+    derniere = None
+    for essai, methode in enumerate(("ssl", "starttls", "ssl", "starttls")):
+        try:
+            _envoyer_une_fois(m, methode)
+            log.info("Mail envoyé (%s, essai %d) : %s", methode, essai + 1, sujet)
+            return
+        except smtplib.SMTPAuthenticationError:
+            raise                                       # mauvais mot de passe : inutile de réessayer
+        except (smtplib.SMTPException, OSError) as e:
+            derniere = e
+            log.warning("Envoi du mail raté (%s, essai %d/4) : %s", methode, essai + 1, type(e).__name__)
+            time.sleep(5 * (essai + 1))
+    raise derniere
 
 
 # ----------------------------------------------------------------- MÉMOIRE DES ALERTES
@@ -478,6 +515,9 @@ def actualites_yahoo(t, n=3, jours=7):
 def telecharger_historiques(tickers):
     resultat = {}
     for i in range(0, len(tickers), TAILLE_LOT_TELECHARGEMENT):
+        if duree_depassee():
+            anomalie(f"Durée maximale atteinte ({DUREE_MAX_MINUTES:.0f} min) : {len(resultat)}/{len(tickers)} historiques analysés.")
+            break
         lot = tickers[i:i + TAILLE_LOT_TELECHARGEMENT]
         if i > 0 and (i // TAILLE_LOT_TELECHARGEMENT) % 10 == 0:
             log.info("  ... %d/%d historiques téléchargés ...", i, len(tickers))
@@ -751,8 +791,9 @@ def agent_screener_yahoo():
             EquityQuery("eq", ["exchange", exchange]),
             EquityQuery("lt", ["intradayprice", PRIX_MAX]),
             EquityQuery("gt", ["intradayprice", PRIX_MIN]),
-            EquityQuery("gt", ["avgdailyvol3m", 30000]),
+            EquityQuery("gt", ["avgdailyvol3m", VOLUME_MOYEN_MIN]),
         ])
+        n_place = 0
         for page in range(PAGES_PAR_PLACE):
             try:
                 log.info("Agent 1 : %s (page %d/%d)...", pays, page + 1, PAGES_PAR_PLACE)
@@ -774,9 +815,11 @@ def agent_screener_yahoo():
                 prix = quote.get("regularMarketPrice")
                 volume = quote.get("averageDailyVolume3Month") or 0
                 candidats[sym] = {"prix": prix, "liquidite": (prix or 0) * volume}
+                n_place += 1
             if len(quotes) < 100:
                 break
             time.sleep(2)
+        log.info("Agent 1 : %s -> %d titres retenus.", pays, n_place)
 
     if not candidats:
         anomalie("Le screener Yahoo n'a rien renvoyé : utilisation de la liste de secours.")
@@ -1242,14 +1285,43 @@ def candidats_du_moment():
     return donnees
 
 
+def ecrire_statut(nb_retenus, nb_mails, statut):
+    """Écrit derniere_execution.json : preuve de chaque passage (heure, volumes, anomalies).
+    Le workflow le publie avec le reste du site, donc le site est actualisé à chaque lancement."""
+    try:
+        FICHIER_STATUT.write_text(json.dumps({
+            "heure_paris": maintenant().isoformat(timespec="seconds"),
+            "statut": statut,
+            "candidats": STATS.get("candidats", 0),
+            "historiques_recus": STATS.get("historiques_recus", 0),
+            "passent_filtre_technique": nb_retenus,
+            "mails_envoyes": nb_mails,
+            "anomalies": list(dict.fromkeys(ANOMALIES))[:20],
+            "duree_secondes": round(time.time() - _debut_passage["t"]),
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        log.warning("Écriture du statut impossible : %s", type(e).__name__)
+
+
+def finaliser_passage(nb_retenus, nb_mails, statut):
+    """Mise à jour du suivi et du statut, à CHAQUE passage (même sans mail, même passage annulé)."""
+    ecrire_statut(nb_retenus, nb_mails, statut)
+    try:
+        suivi.mettre_a_jour()
+    except Exception as e:
+        anomalie(f"Suivi : mise à jour impossible ({type(e).__name__}).")
+
+
 def un_passage():
     STATS.clear()
     ANOMALIES.clear()
+    _debut_passage["t"] = time.time()
 
     ok, raison = marche_ok()
     log.info("Marché : %s", raison)
     if not ok:
         log.info("Passage annulé (filtre de marché).")
+        finaliser_passage(0, 0, "annulé : " + raison)
         return
 
     candidats = candidats_du_moment()
@@ -1269,10 +1341,7 @@ def un_passage():
     log.info("Entonnoir : %s", resume_entonnoir())
     log.info("Bilan Entonnoir : %s", diagnostiquer_entonnoir())
     log.info("Passage terminé — %d mail(s) envoyé(s)", nb_mails)
-    try:
-        suivi.mettre_a_jour()
-    except Exception as e:
-        anomalie(f"Suivi : mise à jour impossible ({type(e).__name__}).")
+    finaliser_passage(len(retenus), nb_mails, "terminé")
     agent_superviseur()
 
 
@@ -1282,6 +1351,7 @@ def passage_securise():
         return True
     except Exception as e:
         log.exception("Passage en échec")
+        ecrire_statut(0, 0, f"erreur : {type(e).__name__}")
         signaler_au_superviseur("SUPERVISEUR Bourse — erreur critique",
                                 [f"Erreur critique : {type(e).__name__} {str(e)[:200]}"])
         return False
