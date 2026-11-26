@@ -2,7 +2,6 @@ name: Bourse Pepites
 
 # Lancement : un service externe (cron-job.org) déclenche ce workflow à l'heure exacte
 # (8h, 10h, 12h, 14h, 16h, heure de Paris, du lundi au vendredi) via l'API GitHub.
-# Le déclencheur « schedule » de GitHub est retiré : il part avec 10 à 40 minutes de retard.
 # Lancement manuel possible à tout moment : Actions -> Bourse Pepites -> Run workflow.
 on:
   workflow_dispatch:
