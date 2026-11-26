@@ -1341,6 +1341,19 @@ def un_passage():
     log.info("Entonnoir : %s", resume_entonnoir())
     log.info("Bilan Entonnoir : %s", diagnostiquer_entonnoir())
     log.info("Passage terminé — %d mail(s) envoyé(s)", nb_mails)
+
+    # Envoi d'un mail de bilan si aucune pépite n'a été trouvée
+    if nb_mails == 0:
+        try:
+            corps_bilan = (
+                "Passage terminé : aucune pépite retenue aujourd'hui.\n\n"
+                f"Entonnoir : {resume_entonnoir()}\n"
+                f"Diagnostic : {diagnostiquer_entonnoir()}"
+            )
+            envoyer_mail("Bourse — Passage sans achat", corps_bilan)
+        except Exception as e:
+            anomalie(f"Envoi du mail de bilan vide impossible : {type(e).__name__}")
+
     finaliser_passage(len(retenus), nb_mails, "terminé")
     agent_superviseur()
 
