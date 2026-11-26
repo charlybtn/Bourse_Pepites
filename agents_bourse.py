@@ -60,6 +60,9 @@ GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 DEST_EMAIL = os.getenv("DEST_EMAIL") or GMAIL_USER
 MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Modèles essayés dans l'ordre (le premier qui répond est gardé). Modifiable : GEMINI_MODEL="modele1,modele2"
+GEMINI_MODELES = [m.strip() for m in (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite,gemini-3.6-flash,gemini-3.8-flash,gemini-2.5-flash").split(",") if m.strip()]
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
@@ -878,9 +881,11 @@ def agent_filtre(candidats):
         if not (PRIX_MIN <= prix <= PRIX_MAX):
             compter("rejet_prix")
             continue
-        if float((h["Close"] * h["Volume"]).rolling(20).mean().iloc[-1]) < VALEUR_JOUR_MIN:
+        valeur_jour = float((h["Close"] * h["Volume"]).rolling(20).mean().iloc[-1])
+        if valeur_jour < VALEUR_JOUR_MIN:
             compter("rejet_liquidite")
             continue
+        ana["valeur_jour"] = valeur_jour
         if ana["volatilite"] < VOLATILITE_MIN:
             compter("rejet_volatilite")
             continue
@@ -891,6 +896,120 @@ def agent_filtre(candidats):
                  ", confirmé en séance" if live else "", prix)
     compter("passent_filtre_technique", len(retenus))
     return retenus
+
+
+_gemini_modele_ok = {"nom": None}
+
+
+def decrire_entreprise(nom, info):
+    """Description simple (2 phrases en français) à partir du résumé Yahoo, via Gemini.
+    Renvoie (texte, None) ou (None, raison de l'échec). La clé passe dans l'en-tête, jamais dans l'adresse."""
+    resume = (info.get("longBusinessSummary") or "").strip()
+    if not GEMINI_API_KEY:
+        return None, "clé Gemini absente"
+    if not resume:
+        return None, "pas de résumé de l'entreprise chez Yahoo"
+    prompt = (
+        f"Voici le résumé (en anglais) de l'activité de l'entreprise {nom} :\n{resume[:1500]}\n\n"
+        "Écris en français, en 2 phrases simples (45 mots maximum), ce que fait cette entreprise et sur quels marchés. "
+        "N'invente rien : utilise uniquement ce résumé. Pas de titre, pas de liste."
+    )
+    corps = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600}}
+    modeles = [_gemini_modele_ok["nom"]] if _gemini_modele_ok["nom"] else GEMINI_MODELES
+    for modele in modeles:
+        try:
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{modele}:generateContent",
+                              headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                              json=corps, timeout=30)
+        except requests.RequestException as e:
+            return None, f"erreur réseau Gemini ({type(e).__name__})"
+        if r.status_code in (400, 404):
+            continue                                   # modèle indisponible pour ce projet : on essaie le suivant
+        if r.status_code != 200:
+            return None, f"Gemini a répondu code {r.status_code}"
+        try:
+            texte = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        if texte:
+            _gemini_modele_ok["nom"] = modele
+            return texte[:450], None
+    return None, "aucun modèle Gemini disponible"
+
+
+def plus_et_moins(titre, info, raison, pct, nb_analystes, info_actu, hausse_pct, nb_cas, mode, spread_pct):
+    """Points forts et points faibles de l'action, tirés uniquement des données calculées (rien d'inventé)."""
+    plus, moins = [], []
+    raison = raison or ""
+    m = re.search(r"F-Score (\d+)/9", raison)
+    if "Très solide" in raison and m:
+        plus.append(f"Bilan très solide (score de santé financière {m.group(1)}/9)")
+    elif "Rentable" in raison:
+        plus.append("Entreprise rentable et financièrement saine")
+    elif "Crible" in raison:
+        plus.append("Fondamentaux validés par le filtre Crible")
+    if pct is not None and nb_analystes >= MIN_ANALYSTES and pct >= SEUIL_ANALYSTES:
+        plus.append(f"{pct * 100:.0f} % des analystes recommandent l'achat ({nb_analystes} analystes)")
+    if titre.get("strategie") == "explosif":
+        plus.append("Cassure récente au-dessus des plus hauts des 20 derniers jours, avec un volume très supérieur à la normale")
+    else:
+        txt = "Tendance de fond haussière (cours au-dessus de sa moyenne à 200 jours)"
+        if titre.get("repli_pct", 0) <= -3:
+            txt += f", après un repli de {abs(titre['repli_pct']):.0f} % depuis le plus haut des 20 derniers jours"
+        plus.append(txt)
+    if info_actu and info_actu["moyen"] > 0.1:
+        meilleur = info_actu["titres"][-1]
+        plus.append(f"Actualité récente plutôt positive (sentiment {info_actu['moyen']:+.2f})"
+                    + (f" : « {str(meilleur[1])[:90]} »" if meilleur[1] else ""))
+    if titre.get("valeur_jour", 0) >= 1_000_000:
+        plus.append(f"Bonne liquidité (environ {titre['valeur_jour'] / 1e6:.1f} M€ échangés par jour)")
+
+    vol = titre.get("volatilite")
+    if vol and vol >= 3:
+        moins.append(f"Action très volatile (variation moyenne d'environ {vol:.1f} % par jour) : les écarts jouent dans les deux sens")
+    if hausse_pct >= 15:
+        moins.append(f"Cible ambitieuse (+{hausse_pct:.0f} %)")
+    if nb_analystes < MIN_ANALYSTES:
+        moins.append("Peu ou pas d'analystes qui suivent le titre")
+    cap = info.get("marketCap")
+    if cap and cap < 500e6:
+        moins.append(f"Petite capitalisation (environ {cap / 1e6:.0f} M€) : plus risquée et plus sensible aux annonces")
+    if mode != "épisodes" or nb_cas < 10:
+        unite = "épisodes" if mode == "épisodes" else "séances testées"
+        moins.append(f"Peu de situations passées comparables ({nb_cas} {unite}) : estimation fragile")
+    if spread_pct is not None and spread_pct >= 0.4:
+        moins.append(f"Écart acheteur/vendeur élevé ({spread_pct:.2f} %)")
+    if titre.get("var5_pct", 0) <= -5:
+        moins.append(f"Baisse récente de {abs(titre['var5_pct']):.0f} % sur 5 séances")
+    return plus[:4], moins[:4]
+
+
+def jours_calendaires(seances):
+    return max(1, round(seances * 7 / 5))
+
+
+def construire_mail(r):
+    """Mail simple : entreprise, prix et délai, chance, description + plus/moins, anomalies. Rien d'autre."""
+    txt_isin = f" ({r['isin']})" if r["isin"] != "Inconnu" else " (ISIN non trouvé)"
+    txt_cout = "frais et impôts compris" if TAUX_PRELEVEMENTS > 0 else "frais compris"
+    jours, jours_max = jours_calendaires(r["duree_hist"]), jours_calendaires(HORIZON_MAX_SEANCES)
+    plus = [f"  + {x}" for x in r["plus"]] or ["  (rien de particulier)"]
+    moins = [f"  - {x}" for x in r["moins"]] or ["  (rien de particulier)"]
+    anomalies = [f"  ! {x}" for x in r["anomalies"]] or ["  Aucune anomalie constatée."]
+    lignes = [
+        f"{r['nom']}{txt_isin}", "",
+        f"ENTRÉE : {r['prix']:.2f} € ({r['quantite']} actions ; ne pas acheter au-dessus de {r['prix_achat_max']:.2f} €)",
+        f"SORTIE : {r['prix_cible']:.2f} € (+{r['hausse_pct']:.1f} %) -> gain net estimé "
+        f"{r['gain_net_eur']:+.2f} € ({r['gain_net_pct']:+.1f} %), {txt_cout}",
+        f"DÉLAI : environ {jours} jours (maximum {jours_max} jours)",
+        f"CHANCES QUE LA SORTIE SE FASSE À {r['prix_cible']:.2f} € OU PLUS : environ {r['taux_hist']:.0f} % "
+        f"d'après l'historique de l'action (estimation prudente : {r['borne_basse']:.0f} %)", "",
+        "L'ENTREPRISE", r["description"], "",
+        "Les plus :", *plus, "",
+        "Les moins :", *moins, "",
+        "ANOMALIES / NON TROUVÉ", *anomalies,
+    ]
+    return "\n".join(lignes)
 
 
 def agent_analyse_fondamentale(titre, memoire):
@@ -985,6 +1104,31 @@ def agent_analyse_fondamentale(titre, memoire):
         lignes_actus += ["Yahoo Finance :"] + [f"  - {tt}" for tt in titres_y]
     fait = "\n".join(lignes_actus)
 
+    description, erreur_desc = decrire_entreprise(nom, info)
+    if not description:
+        morceaux = [x for x in (info.get("sector"), info.get("industry")) if x]
+        description = (" – ".join(morceaux) + (f" ({info['country']})" if info.get("country") else "") + ".") if morceaux else "Description non disponible."
+    plus, moins = plus_et_moins(titre, info, raison, pct, nb_analystes, info_actu, hausse_pct, nb_cas, mode, spread_pct)
+
+    anomalies = []
+    if isin == "Inconnu":
+        anomalies.append("ISIN non trouvé : à vérifier avant l'ordre"
+                         + ("; éligibilité PEA déduite du pays de l'entreprise, à confirmer chez Fortuneo" if source_pea == "pays" else ""))
+    if not info_actu:
+        txt = f"Marketaux : aucune actualité exploitable ({msg_actu.rstrip('.')})"
+        txt += (" ; titres Yahoo récents : " + " | ".join(f"« {tt} »" for tt in titres_y[:2])) if titres_y else " ; aucun titre récent sur Yahoo Finance non plus"
+        anomalies.append(txt + ". À vérifier avant d'acheter")
+    if nb_analystes < MIN_ANALYSTES:
+        anomalies.append("Aucun avis d'analyste exploitable (moins de 3 analystes)")
+    if spread_pct is None:
+        anomalies.append("Écart acheteur/vendeur non disponible (à vérifier dans le carnet d'ordres)")
+    if mode != "épisodes":
+        anomalies.append(f"Historique comparable limité (moins de {MIN_EPISODES} épisodes) : le pourcentage de chances est indicatif")
+    if not titre.get("live"):
+        anomalies.append("Séance du jour non ouverte ou terminée : le prix d'entrée est la dernière clôture connue")
+    if erreur_desc:
+        anomalies.append(f"Description de l'entreprise simplifiée : {erreur_desc}")
+
     return {
         "ticker": ticker, "nom": nom, "isin": isin, "pea": pea, "source_pea": source_pea, "prix": titre["prix"],
         "quantite": quantite,
@@ -995,6 +1139,7 @@ def agent_analyse_fondamentale(titre, memoire):
         "prix_achat_max": prix_achat_max, "gain_net_max_eur": gain_max_eur,
         "spread_pct": spread_pct, "episodes": nb_cas, "borne_basse": borne * 100,
         "fait": fait, "analystes": txt_analystes,
+        "description": description, "plus": plus, "moins": moins, "anomalies": anomalies,
     }
 
 
@@ -1025,38 +1170,8 @@ def envoyer_pepite(r, memoire):
     if pb:
         anomalie(f"Résultat {r['ticker']} bloqué avant envoi : {', '.join(pb)}.")
         return False
-    txt_cout = "frais et impôts compris" if TAUX_PRELEVEMENTS > 0 else "frais compris"
-    if r["mode_backtest"] == "épisodes":
-        txt_ep = f"{r['episodes']} épisodes indépendants"
-    else:
-        txt_ep = f"{r['episodes']} séances, peu d'épisodes : statistique indicative"
-    if r["spread_pct"] is not None:
-        txt_spread = f"{r['spread_pct']:.2f} %"
-    else:
-        txt_spread = "non disponible (à vérifier dans le carnet d'ordres)"
-    txt_isin = r["isin"] if r["isin"] != "Inconnu" else "(ISIN non trouvé : à vérifier avant l'ordre)"
-    txt_pea = "éligible (d'après l'ISIN)" if r.get("source_pea") == "isin" else "éligible d'après le pays de l'entreprise : à confirmer chez Fortuneo"
-    txt_signal = "dernière séance terminée" + (" + confirmé sur la séance en cours" if r.get("signal_live") else "")
-    corps = (
-        f"{r['nom']} {txt_isin}\n"
-        f"Achat {r['quantite']} a {r['prix']:.2f} Euros et vente a {r['prix_cible']:.2f} Euros "
-        f"dans environ {formater_duree(r['duree_hist'])}\n\n"
-        f"STRATÉGIE : {r['strategie']} (signal : {txt_signal})\n"
-        f"PRIX D'ENTRÉE : {r['prix']:.2f} €\n"
-        f"PRIX D'ACHAT MAXIMUM : {r['prix_achat_max']:.2f} € (au-delà, ne pas acheter ; gain net à ce prix : {r['gain_net_max_eur']:+.2f} €)\n"
-        f"PRIX DE SORTIE : {r['prix_cible']:.2f} € (+{r['hausse_pct']:.1f} %) -> gain net estimé "
-        f"{r['gain_net_eur']:+.2f} € ({r['gain_net_pct']:+.1f} %), {txt_cout}\n"
-        f"DURÉE ESTIMÉE ENTRE LES DEUX : environ {r['duree_hist']} séances de bourse "
-        f"({formater_duree(r['duree_hist'])}), maximum {HORIZON_MAX_SEANCES} séances\n"
-        f"FIABILITÉ : cible atteinte dans {r['taux_hist']:.0f} % des cas passés similaires "
-        f"({txt_ep}, fourchette basse ≈ {r['borne_basse']:.0f} %)\n"
-        f"ORDRES : achat à cours limité, max {r['prix_achat_max']:.2f} € ; vente à cours limité à {r['prix_cible']:.2f} €\n"
-        f"ÉCART ACHETEUR/VENDEUR : {txt_spread}\n"
-        f"PEA : {txt_pea}\n\n"
-        f"ACTUALITÉS :\n{r['fait']}"
-    )
-    log.info("Pépite retenue : %s | %s | %s | news : %s", r["ticker"], r["raison_fin"],
-             r["analystes"], str(r["fait"])[:80])
+    corps = construire_mail(r)
+    log.info("Pépite retenue : %s | %s | %s", r["ticker"], r["raison_fin"], r["analystes"])
     try:
         envoyer_mail("ACHAT Bourse", corps)
     except Exception as e:
