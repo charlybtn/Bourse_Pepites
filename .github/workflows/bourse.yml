@@ -1,0 +1,68 @@
+name: Bourse Pepites
+
+# Lancement : un service externe (cron-job.org) déclenche ce workflow à l'heure exacte
+# (9h, 11h, 13h, 15h, 17h, heure de Paris, du lundi au vendredi) via l'API GitHub.
+# Le déclencheur « schedule » de GitHub est retiré : il part avec 10 à 40 minutes de retard.
+# Lancement manuel possible à tout moment : Actions -> Bourse Pepites -> Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bourse
+  cancel-in-progress: false
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas requests
+
+      - name: Run script
+        run: python agents_bourse.py --une-fois
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Étendue de la recherche (plafonds : le nombre réel dépend de ce que Yahoo renvoie)
+          MAX_DOSSIERS: "10000"       # nombre maximal de titres analysés
+          PAGES_PAR_PLACE: "15"       # pages de 100 titres par place boursière
+          SEUILS_VOLUME: "10000,3000,1000,300"   # passes successives de volume moyen 3 mois
+          DUREE_MAX_MINUTES: "28"     # arrêt des téléchargements au-delà
+
+      # Publication du site à CHAQUE passage (même sans mail), y compris si le script a échoué.
+      # Les fichiers modifiés par le script (suivi, page du site, derniere_execution.json) sont
+      # enregistrés dans le dépôt ; GitHub Pages se reconstruit ensuite automatiquement.
+      - name: Publier le site
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Ne jamais publier les fichiers temporaires Python
+          printf '__pycache__/\n*.pyc\n' >> .git/info/exclude
+          git add -A
+          if git diff --staged --quiet; then
+            echo "Aucun changement à publier."
+            exit 0
+          fi
+          git commit -m "Maj auto $(TZ=Europe/Paris date '+%d/%m/%Y %H:%M')"
+          for essai in 1 2 3; do
+            git pull --rebase --autostash && git push && exit 0
+            echo "Envoi raté (essai $essai), nouvelle tentative..."
+            sleep 5
+          done
+          exit 1
