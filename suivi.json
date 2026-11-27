@@ -1112,7 +1112,7 @@
    "strategie": "explosif",
    "prix_achat_max": 20.96,
    "duree_estimee_seances": 14,
-   "prix_actuel": 21.8,
+   "prix_actuel": 22.2,
    "seances": 1,
    "statut": "en_cours",
    "historique": [
@@ -1646,10 +1646,10 @@
     ],
     [
      "2026-11-27",
-     21.8
+     22.2
     ]
    ]
   }
  ],
- "maj": "2026-11-27T15:08:00.815520+01:00"
+ "maj": "2026-11-27T17:03:11.935248+01:00"
 }
