@@ -12,7 +12,7 @@
    "strategie": "explosif",
    "prix_achat_max": 4.54,
    "duree_estimee_seances": 15,
-   "prix_actuel": 4.604,
+   "prix_actuel": 4.618,
    "seances": 2,
    "statut": "en_cours",
    "historique": [
@@ -546,7 +546,7 @@
     ],
     [
      "2026-11-27",
-     4.604
+     4.618
     ]
    ]
   },
@@ -562,7 +562,7 @@
    "strategie": "5 voyants",
    "prix_achat_max": 7.55,
    "duree_estimee_seances": 14,
-   "prix_actuel": 7.36,
+   "prix_actuel": 7.4,
    "seances": 1,
    "statut": "en_cours",
    "historique": [
@@ -1096,7 +1096,7 @@
     ],
     [
      "2026-11-27",
-     7.36
+     7.4
     ]
    ]
   },
@@ -1112,7 +1112,7 @@
    "strategie": "explosif",
    "prix_achat_max": 20.96,
    "duree_estimee_seances": 14,
-   "prix_actuel": 22.2,
+   "prix_actuel": 21.85,
    "seances": 1,
    "statut": "en_cours",
    "historique": [
@@ -1646,7 +1646,7 @@
     ],
     [
      "2026-11-27",
-     22.2
+     21.85
     ]
    ]
   },
@@ -5497,5 +5497,5 @@
    ]
   }
  ],
- "maj": "2026-11-27T17:03:11.935248+01:00"
+ "maj": "2026-11-27T21:17:06.078412+01:00"
 }
