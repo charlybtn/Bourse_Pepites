@@ -1,10 +1,10 @@
 {
- "heure_paris": "2026-11-27T21:17:04+01:00",
+ "heure_paris": "2026-11-28T09:59:54+01:00",
  "statut": "terminé",
  "candidats": 2304,
  "historiques_recus": 2304,
  "passent_filtre_technique": 26,
- "mails_envoyes": 7,
+ "mails_envoyes": 0,
  "anomalies": [],
- "duree_secondes": 374
+ "duree_secondes": 232
 }
